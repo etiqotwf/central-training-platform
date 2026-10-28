@@ -1,0 +1,29 @@
+# Run on your own inference host with Docker Compose, not the Render web container.
+services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+      - ../local-llm:/models:ro
+    ports:
+      - "127.0.0.1:11434:11434"
+  gateway:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      MODEL_DOMAIN: ${MODEL_DOMAIN:?Set the DNS name for your inference host}
+      MODEL_GATEWAY_TOKEN: ${MODEL_GATEWAY_TOKEN:?Set a strong private gateway token}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - ollama
+volumes:
+  ollama-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,40 @@
+require('./sqlite-test-adapter.cjs');
+const assert=require('assert/strict'),db=require('../db'),express=require('express');
+const app=express();app.use(express.json());const q=(s,...v)=>db.prepare(s).run(...v),one=(s,...v)=>db.prepare(s).get(...v),all=(s,...v)=>db.prepare(s).all(...v);
+for(const [id,role]of [[1,'admin'],[2,'trainee'],[3,'trainer']])q('INSERT INTO users(id,username,password_hash,role,display_name) VALUES(?,?,?,?,?)',id,'user'+id,'hash',role,'Member '+id);
+app.use((req,res,next)=>{req.session={user:one('SELECT * FROM users WHERE id=?',Number(req.headers['x-user']||0))};next()});const auth=(req,res,next)=>req.session.user?next():res.sendStatus(401),role=(...roles)=>(req,res,next)=>roles.includes(req.session.user.role)?next():res.sendStatus(403);
+require('../platform-chat')({app,db,q,one,all,auth,role});
+const server=app.listen(0,'127.0.0.1',async()=>{const base='http://127.0.0.1:'+server.address().port;async function call(path,user=1,body,method=body?'POST':'GET'){const r=await fetch(base+path,{method,headers:{'x-user':String(user),'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});return {status:r.status,data:await r.json().catch(()=>({}))}}
+const control=new AbortController();let stream;
+try{
+ assert.equal((await call('/api/chat/messages',0)).status,401);
+ const eventResponse=await fetch(base+'/api/chat/events',{headers:{'x-user':'3'},signal:control.signal});assert.match(eventResponse.headers.get('content-type'),/text\/event-stream/);stream=eventResponse.body.getReader();assert.match(new TextDecoder().decode((await stream.read()).value),/event: ready/);
+ let r=await call('/api/chat/messages',2,{body:'My question',client_nonce:'question_00001'});assert.equal(r.status,201);const root=r.data.id;const signal=await stream.read();assert.match(new TextDecoder().decode(signal.value),/event: change/);
+ r=await call('/api/chat/messages',3,{body:'Trainer reply',parent_id:root,client_nonce:'reply_00001'});assert.equal(r.status,201);const reply=r.data.id;
+ r=await call('/api/chat/messages',2,{body:'My question',client_nonce:'question_00001'});assert.equal(r.data.id,root);assert.equal(one('SELECT COUNT(*) n FROM platform_messages').n,2);
+ assert.equal((await call('/api/chat/summary',1)).data.unread,2);assert.equal((await call('/api/chat/summary',2)).data.unread,1);
+ r=await call('/api/chat/messages',1);assert.equal(r.data.messages[1].parent_body,'My question');
+ await call('/api/chat/read',1,{through_id:reply});assert.equal((await call('/api/chat/summary',1)).data.unread,0);
+ assert.equal((await call('/api/chat/messages/'+root,2,null,'DELETE')).status,403);assert.equal((await call('/api/chat/messages/'+root,3,null,'DELETE')).status,403);
+ assert.equal((await call('/api/chat/messages/'+root,1,null,'DELETE')).status,200);
+ r=await call('/api/chat/messages',3);assert.equal(r.data.messages[0].body,'');assert.ok(r.data.messages[0].deleted_at);assert.equal(r.data.messages[1].body,'Trainer reply');assert.equal(r.data.messages[1].parent_body,'');
+ assert.equal((await call('/api/chat/messages',2,{body:'After delete',parent_id:root,client_nonce:'deleted_00001'})).status,400);
+ assert.equal((await call('/api/chat/messages',2,{body:'x'.repeat(2001),client_nonce:'long_000001'})).status,400);
+ for(let i=0;i<65;i++)q('INSERT INTO platform_messages(author_id,body,client_nonce) VALUES(?,?,?)',3,'Message '+i,'older_'+i);
+ r=await call('/api/chat/messages',2);assert.equal(r.data.messages.length,60);assert.equal(r.data.has_more,true);assert.ok(r.data.messages.every((m,i,a)=>!i||m.id>a[i-1].id));
+ const old=await call('/api/chat/messages?before='+r.data.messages[0].id,2);assert.equal(old.data.messages.length,7);assert.equal(old.data.has_more,false);
+ await call('/api/chat/read',2,{through_id:999999});assert.equal((await call('/api/chat/summary',2)).data.unread,0);await call('/api/chat/read',2,{through_id:1});assert.equal((await call('/api/chat/summary',2)).data.unread,0);
+ // Bulk moderation must be explicit, administrator-only, and bounded to the preview snapshot.
+ const cutoff=one('SELECT MAX(id) id FROM platform_messages').id;
+ assert.equal((await call('/api/chat/clear',2,{through_id:cutoff,confirmation:'CLEAR_CHAT'})).status,403);
+ assert.equal((await call('/api/chat/clear',3,{through_id:cutoff,confirmation:'CLEAR_CHAT'})).status,403);
+ assert.equal((await call('/api/chat/clear',1,{through_id:cutoff})).status,400);
+ const newer=await call('/api/chat/messages',3,{body:'Arrived after confirmation opened',client_nonce:'after_clear_snapshot'});
+ r=await call('/api/chat/clear',1,{through_id:cutoff,confirmation:'CLEAR_CHAT'});assert.equal(r.status,200);
+ r=await call('/api/chat/messages',2);assert.equal(r.data.messages.length,1);assert.equal(r.data.messages[0].id,newer.data.id);
+ assert.equal(one('SELECT COUNT(*) n FROM platform_messages WHERE id<=? AND body<>\'\'',cutoff).n,0);
+ assert.equal((await call('/api/chat/summary',2)).data.unread,1);
+ await call('/api/chat/clear',1,{through_id:newer.data.id,confirmation:'CLEAR_CHAT'});assert.equal((await call('/api/chat/messages',2)).data.messages.length,0);
+ assert.equal((await call('/api/chat/summary',2)).data.unread,0);
+ console.log('PASS live platform chat: all roles, SSE updates, unread/reading, threaded replies, idempotence, pagination, text limit, admin-only deletion and redacted quotes with preserved replies.');
+}catch(e){console.error(e);process.exitCode=1}finally{control.abort();stream?.cancel().catch(()=>{});server.close();server.closeAllConnections()}});
