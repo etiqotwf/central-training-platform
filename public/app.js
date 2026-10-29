@@ -1,14 +1,16 @@
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 let me=null, currentPage="dashboard", renderPageRequestId=0, cache={courses:[],trainees:[],trainers:[],sessions:[],applications:[],batches:[],library:[]};
+let dashboardSnapshot=null,dashboardSnapshotAt=0;
 const pages={
  "ai-jobs":["التوليد المحلي والنتائج","طلباتك ونتائج جهاز التوليد"],
  "learning-path":["مساري الذكي","تعلّم يتكيف مع تقدمك"],"learning-lab":["مركز التعلم التكيفي","المهارات والسياسات والتقييم"],
  "ai-assistant":["المساعد الذكي","تعلم ودرّب وحلّل"],"ai-settings":["إعدادات الذكاء الاصطناعي","المحتوى والاستخدام"],
- "sheet-exams":["نتائج الاختبارات الخارجية","Google Sheets"],"sheet-evaluations":["نتائج التقييمات الخارجية","Google Sheets"],"course-gallery":["معرض الدورات المنفذة","صور وأرشيف الدورات"],"learning-progress":["سجل الإنجاز","النتائج والتقدم"],
+ "sheet-exams":["الأرشيف","ملفات الدورات والتقارير"],"sheet-evaluations":["قواعد البيانات","نتائج التقييمات الخارجية وتحليلها"],"course-gallery":["معرض الدورات المنفذة","صور وأرشيف الدورات"],"learning-progress":["سجل الإنجاز","النتائج والتقدم"],
  dashboard:["الرئيسية","ملخص التدريب"],reports:["تقارير وإحصائيات","لوحة مستقلة لكل تقرير"],"report-platform":["تقارير المنصة","المؤشرات العامة للمنصة"],"report-courses":["تقارير الدورات","تفاصيل التسجيل والتوزيع"],"report-trainers":["تقارير المحاضرين","مؤشرات نشاط المحاضرين"],courses:["الدورات التدريبية","إدارة الدورات"],trainees:["المتدربون","إدارة ملفات المتدربين"],
  trainers:["بيانات المحاضرين","إدارة ملفات المحاضرين"],sessions:["البث المباشر","جدولة الجلسات والبث المباشر"],attendance:["الحضور اليومي","متابعة الحضور"],applications:["طلبات الترشح","مراجعة طلبات الالتحاق بالدورات"],programs:["البرامج التدريبية","إدارة البرامج التدريبية وتجميع الدورات"],payments:["الدفعات التدريبية","متابعة الدفعات والمجموعات التدريبية"],library:["المكتبة","المواد والملفات التدريبية"],"my-programs":["برامجي","البرامج والدورات المرتبطة بحسابك"],tasks:["المهام","إدارة مهام المتدربين ومتابعة الإنجاز"],assignments:["الواجبات","استلام الواجبات ومراجعة التسليمات"],tests:["الاختبارات","الاختبارات والتقييمات التدريبية"],"evaluation-templates":["قوالب التقييم","إنشاء وإدارة نماذج التقييم"],"trainee-evaluation":["تقييم المتدربين","متابعة تقييمات المتدربين"],"trainer-evaluation":["تقييم المحاضرين","مراجعة تقييمات المحاضرين"],"program-evaluation":["تقييم البرنامج التدريبي","تحليل آراء المتدربين حول البرامج"],"trainee-rating":["تقييم متدرب","سجل تقييمات كل متدرب"],certificates:["الشهادات","الشهادات وسجل الإنجاز"],notifications:["الإشعارات","آخر التنبيهات الخاصة بحسابك"],contact:["اتصل بنا","التواصل مع إدارة المعهد"],settings:["إعدادات المدير","تغيير كلمة المرور وإدارة صلاحيات الحسابات"]
 };
-async function api(url,opts={}){const res=await fetch("/api"+url,{credentials:"same-origin",headers:{"Content-Type":"application/json",...(opts.headers||{})},...opts});let data={};try{data=await res.json()}catch{}if(!res.ok)throw new Error(data.error||"حدث خطأ");return data}
+async function api(url,opts={}){const res=await fetch("/api"+url,{credentials:"same-origin",headers:{"Content-Type":"application/json",...(opts.headers||{})},...opts});let data={};try{data=await res.json()}catch{}if(!res.ok)throw new Error(data.error||data.message||"حدث خطأ");return data}
+async function dashboardData(force=false){if(!force&&dashboardSnapshot&&Date.now()-dashboardSnapshotAt<60000)return dashboardSnapshot;const data=await api("/dashboard");dashboardSnapshot=data;dashboardSnapshotAt=Date.now();return data}
 function esc(s=""){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 function showMessage(text){const el=$("#message");el.textContent=text;el.hidden=false;setTimeout(()=>el.hidden=true,5000)}
 
@@ -30,7 +32,7 @@ function navItems(){
   {id:"people",label:"إدارة الأشخاص",items:[["trainees","المتدربون"],["trainers","المحاضرون"]]},
   {id:"applications",label:"طلبات الترشح",items:[["applications","طلبات الترشح"]]},
   {id:"library",label:"المكتبة",items:[["library","المكتبة التدريبية"],["training-plan","الخطة التدريبية"]]},
-  {id:"learning-results",label:"النتائج والإنجاز",items:[["learning-progress","سجل الإنجاز والنتائج"],["sheet-exams","نتائج الاختبارات الخارجية"],["sheet-evaluations","نتائج التقييمات الخارجية"],["course-gallery","معرض الدورات المنفذة"]]},
+  {id:"learning-results",label:"النتائج والإنجاز",items:[["learning-progress","سجل الإنجاز والنتائج"],["sheet-exams","الأرشيف"],["sheet-evaluations","قواعد البيانات"],["course-gallery","معرض الدورات المنفذة"]]},
   {id:"ai-tools",label:"الذكاء الاصطناعي",items:[["ai-jobs","التوليد المحلي والنتائج"],["learning-path","مساري الذكي"],["learning-lab","مركز التعلم التكيفي"],["ai-assistant","مساعد التعلم والتدريب"],["ai-settings","إعدادات ومراجع المساعد"]]},
   {id:"platform-chat",label:"التواصل والإشعارات",items:[["notifications","الإشعارات والشات"]]},
   {id:"admin-settings",label:"إعدادات المدير",items:[["settings","كلمة المرور والصلاحيات"]]}
@@ -67,6 +69,7 @@ async function renderPage(page){
  if(!canAccessPage(page)){showMessage("ليس لديك صلاحية لفتح هذا القسم.");page="dashboard";}
  const requestId=++renderPageRequestId;
  currentPage=page;navItems();document.querySelectorAll(".portal-topnav [data-page]").forEach(b=>b.classList.toggle("active",b.dataset.page===page));$("#sidebar").classList.remove("open");
+ const content=$("#pageContent");if(content)content.innerHTML=`<div class="page-instant-loader"><span></span><div><strong>${esc(pages[page]?.[0]||"جاري الفتح")}</strong><small>جاري تجهيز المحتوى…</small></div></div>`;
  const heading=$("#pageHeading");if(heading)heading.textContent=pages[page]?.[0]||page;const subheading=$("#subHeading");if(subheading)subheading.textContent=pages[page]?.[1]||"";
  try{
   if(page==='ai-jobs'){ const html=await AIQueue.page();if(requestId!==renderPageRequestId)return;$('#pageContent').innerHTML=html;AIQueue.bind();return; }
@@ -77,7 +80,7 @@ async function renderPage(page){
   const needTrainees=["dashboard","trainees","courses","attendance","applications","reports","report-platform","report-courses","report-trainers","tasks","assignments"].includes(page);
   const needTrainers=me.role==="admin"&&["dashboard","trainers","courses","reports","report-platform","report-courses","report-trainers"].includes(page);
   const needApplications=me.role==="admin"&&["dashboard","applications","reports","report-platform"].includes(page);
-  const jobs=[["dashboard",api("/dashboard")]];
+  const jobs=[["dashboard",dashboardData()]];
   if(needTrainees)jobs.push(["trainees",api("/trainees")]);
   if(needTrainers)jobs.push(["trainers",api("/trainers")]);
   if(needApplications)jobs.push(["applications",api("/applications")]);

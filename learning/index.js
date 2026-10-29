@@ -15,5 +15,5 @@ function activityAllowed(a,u){if(u.role==='admin')return true;if(u.role==='train
 ctx.app.locals.sendActivityFile=async(id,res)=>{const f=ctx.one('SELECT * FROM activity_files WHERE id=?',id);if(!f)error('الملف غير موجود.',404);res.set('Cache-Control','private, no-store');res.attachment(f.name);if(f.location.startsWith('drive:')){const file=await require('../google-bridge').download(f.location.slice(6));return res.send(file.bytes)}const path=require('path'),fs=require('fs');const dir=path.join(process.env.DATA_DIR?path.resolve(process.env.DATA_DIR):path.join(__dirname,'..','data'),'activity-files');const target=path.join(dir,path.basename(f.location));if(!fs.existsSync(target))error('ملف التخزين غير موجود.',404);return res.sendFile(target)};
 ctx.app.locals.learningCourseAllowed=courseAllowed;ctx.app.locals.learningActivityAllowed=activityAllowed;
 const helpers={...ctx,error,wrap,trainee,courseAllowed,activityAllowed};
-require('./assessments')(helpers);require('./programs')(helpers);require('./reuse')(helpers);require('./external-sheets')(helpers);require('./facebook-courses')(helpers);
+require('./assessments')(helpers);require('./programs')(helpers);require('./reuse')(helpers);require('./external-sheets')(helpers);require('./archive')(helpers);require('./facebook-courses')(helpers);
 };

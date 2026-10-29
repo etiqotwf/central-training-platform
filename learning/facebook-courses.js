@@ -67,7 +67,8 @@ module.exports = function ({ app, auth, role, wrap }) {
           }),
 
           ...(opt.headers || {})
-        }
+        },
+        signal: opt.signal || AbortSignal.timeout(15000)
       }
     );
 
@@ -158,7 +159,8 @@ module.exports = function ({ app, auth, role, wrap }) {
           ),
 
           ...(opt.headers || {})
-        }
+        },
+        signal: opt.signal || AbortSignal.timeout(15000)
       }
     );
 
@@ -1790,6 +1792,24 @@ module.exports = function ({ app, auth, role, wrap }) {
     console.log(
       '[Facebook Sync] Starting OLD -> NEW synchronization...'
     );
+
+    // Fail fast: never leave the UI waiting while DNS/network is unavailable.
+    const newProbe = await probe('new', supaUrl(), supaKey());
+    if (!newProbe.ok) {
+      const detail = newProbe.cause || newProbe.error || `HTTP ${newProbe.status || 'unknown'}`;
+      console.error('[Facebook Sync] NEW unavailable:', detail);
+      const dns = /ENOTFOUND|NXDOMAIN|getaddrinfo/i.test(detail);
+      throw Object.assign(Error(dns
+        ? `عنوان Supabase الجديد لا يعمل على DNS: ${supaUrl()}. انسخ Project URL من Supabase > Connect ثم حدّث SUPABASE_URL في Render.`
+        : `تعذر الاتصال بـ Supabase الجديد: ${detail}`), {status:502});
+    }
+    const oldProbe = await probe('old', oldSupaUrl(), oldKey);
+    if (!oldProbe.ok) {
+      const detail = oldProbe.cause || oldProbe.error || `HTTP ${oldProbe.status || 'unknown'}`;
+      console.error('[Facebook Sync] OLD unavailable:', detail);
+      throw Object.assign(Error(`تعذر الاتصال بـ Supabase القديم: ${detail}`), {status:502});
+    }
+    console.log('[Facebook Sync] Connections OK; reading records...');
 
     // Read all existing Facebook records from OLD Supabase
     const oldRows =
