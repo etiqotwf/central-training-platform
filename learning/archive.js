@@ -33,9 +33,14 @@ module.exports=function({app,auth,role,wrap}){
    if(all.length>5000)break;
   }
   const folders=all.filter(x=>x.isFolder),files=all.filter(x=>!x.isFolder);
+  // Dashboard comparisons intentionally use ONLY the first folder level under ROOT.
+  // These are the course folders. Nested folders (documents/categories inside a course)
+  // remain browsable, but never inflate course/month/year comparisons.
+  const courseFolders=(nodes[ROOT]||[]).filter(x=>x.isFolder);
   const byYear={},byMonth={};
-  for(const f of folders){const d=new Date(f.createdTime||f.modifiedTime||0);if(!Number.isFinite(d.getTime()))continue;const y=String(d.getFullYear()),m=`${y}-${String(d.getMonth()+1).padStart(2,'0')}`;byYear[y]=(byYear[y]||0)+1;byMonth[m]=(byMonth[m]||0)+1}
-  cache={root:rootMeta,rootId:ROOT,nodes,stats:{folders:folders.length,files:files.length,total:all.length,years:Object.entries(byYear).sort((a,b)=>a[0].localeCompare(b[0])).map(([label,count])=>({label,count})),months:Object.entries(byMonth).sort((a,b)=>a[0].localeCompare(b[0])).slice(-24).map(([label,count])=>({label,count})),updatedAt:new Date().toISOString()}};cacheAt=Date.now();return cache;
+  for(const f of courseFolders){const d=new Date(f.createdTime||f.modifiedTime||0);if(!Number.isFinite(d.getTime()))continue;const y=String(d.getFullYear()),m=`${y}-${String(d.getMonth()+1).padStart(2,'0')}`;byYear[y]=(byYear[y]||0)+1;byMonth[m]=(byMonth[m]||0)+1}
+  const courseSummary=courseFolders.map(f=>({id:f.id,name:f.name,createdTime:f.createdTime,modifiedTime:f.modifiedTime,items:(nodes[f.id]||[]).length}));
+  cache={root:rootMeta,rootId:ROOT,nodes,stats:{folders:folders.length,files:files.length,total:all.length,courseFolders:courseFolders.length,comparisonScope:'المجلد الرئيسي + مجلدات الدورات بالمستوى الأول فقط',courseSummary,years:Object.entries(byYear).sort((a,b)=>a[0].localeCompare(b[0])).map(([label,count])=>({label,count})),months:Object.entries(byMonth).sort((a,b)=>a[0].localeCompare(b[0])).slice(-24).map(([label,count])=>({label,count})),updatedAt:new Date().toISOString()}};cacheAt=Date.now();return cache;
  }
  app.get('/api/archive',auth,role('admin','trainer'),wrap(async(req,res)=>{res.set('Cache-Control','private, max-age=120');res.json(await snapshot(req.query.refresh==='1'))}));
 };

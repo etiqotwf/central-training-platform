@@ -634,6 +634,7 @@ require('./learning')({app,db,q,one,all,auth,role});
 require('./print-reports')({app,one,all,auth});
 require('./ai')({app,db,q,one,all,auth,role,flush:flushGoogleSheetsWrites});
 require('./adaptive')({app,db,q,one,all,auth,role});
+require('./intelligence')({app,db,q,one,all,auth});
 
 app.use("/api", (req,res)=>res.status(404).json({error:"المسار غير موجود."}));
 app.get("*", (req,res)=>res.sendFile(path.join(__dirname,"public","index.html")));

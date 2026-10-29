@@ -1770,7 +1770,9 @@ module.exports = function ({ app, auth, role, wrap }) {
   // OLD SUPABASE -> NEW SUPABASE
   // MANUAL PERMANENT SYNC
   // =========================================================
-  async function syncOldToNew() {
+  async function syncOldToNew(options = {}) {
+
+    const copyImages = options.copyImages === true;
 
     ensure();
 
@@ -1895,24 +1897,14 @@ module.exports = function ({ app, auth, role, wrap }) {
         return url;
       }
 
-      const cached =
-        await cacheRemoteImage(
-          url,
-          postId,
-          index
-        );
+      // Manual UI sync is intentionally fast: metadata is synchronized first.
+      // Full image caching can be enabled by a controlled background/admin run.
+      if (!copyImages) return url;
 
-      if (cached) {
-
-        imagesCopied++;
-
-        return cached;
-      }
-
-      // Do not destroy a working OLD image URL
-      // if copying it fails.
+      const cached = await cacheRemoteImage(url, postId, index);
+      if (cached) { imagesCopied++; return cached; }
+      // Do not destroy a working OLD image URL if copying it fails.
       imageFailures++;
-
       return url;
     }
 
@@ -2148,8 +2140,8 @@ module.exports = function ({ app, auth, role, wrap }) {
         res
       ) => {
 
-        const result =
-          await syncOldToNew();
+        const timeout = new Promise((_,reject)=>setTimeout(()=>reject(Object.assign(Error('انتهت مهلة المزامنة بعد 45 ثانية. تم إيقاف انتظار الواجهة؛ راجع Logs قبل إعادة المحاولة.'),{status:504})),45000));
+        const result = await Promise.race([syncOldToNew({copyImages:false}), timeout]);
 
         res.json({
           ok:
@@ -2158,7 +2150,7 @@ module.exports = function ({ app, auth, role, wrap }) {
           ...result,
 
           message:
-            `تمت المزامنة بنجاح: ${result.created} جديد، ${result.updated} محدث، ${result.images_copied} صورة محفوظة في التخزين الجديد.`
+            `تمت مزامنة بيانات المعرض بنجاح: ${result.created} جديد، ${result.updated} محدث. الصور الحالية ظلت مرتبطة بمصادرها بدون تعطيل الواجهة.`
         });
       }
     )
