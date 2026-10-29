@@ -5,7 +5,7 @@ module.exports=function({app,auth,role,wrap}){
  const supaKey=()=>String(process.env.SUPABASE_SECRET_KEY||'').trim();
  const bucket=()=>String(process.env.SUPABASE_STORAGE_BUCKET||'facebook-course-images').trim();
  const configured=()=>!!(supaUrl()&&supaKey());
- const headers=(extra={})=>({apikey:supaKey(),Authorization:`Bearer ${supaKey()}`,...extra});
+ const headers=(extra={})=>{const key=supaKey();return {apikey:key,...(key.startsWith('eyJ')?{Authorization:`Bearer ${key}`}:{'Authorization':`Bearer ${key}`}),...extra}};
  const enc=v=>encodeURIComponent(String(v));
  function ensure(){if(!configured())throw Object.assign(Error('تخزين Supabase غير مفعّل. أضف SUPABASE_URL و SUPABASE_SECRET_KEY إلى Environment Variables.'),{status:503})}
  async function db(path,opt={}){ensure();const r=await fetch(`${supaUrl()}/rest/v1/${path}`,{...opt,headers:{...headers({'Content-Type':'application/json'}),...(opt.headers||{})}});const text=await r.text();let j=null;try{j=text?JSON.parse(text):null}catch{j=text}if(!r.ok)throw Error(`Supabase ${r.status}: ${typeof j==='object'?(j.message||j.error||JSON.stringify(j)):j}`);return j}
