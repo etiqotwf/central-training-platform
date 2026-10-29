@@ -1,0 +1,20 @@
+node_modules/
+.env
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+.DS_Store
+
+unified-radar-438118-t9-d5a130d68782.json
+
+*service-account*.json
+
+unified-radar-438118-t9-d5a130d68782.json
+
+# Private worker pairing and pending generated results
+local-worker/*config*.json
+local-worker/.worker-state/
+
+local-worker-config*.json

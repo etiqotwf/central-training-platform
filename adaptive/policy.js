@@ -1,0 +1,14 @@
+'use strict';
+// Small contextual ridge models, one per teaching action. All updates use scored outcomes.
+const ACTIONS=['explain','example','practice','review'];
+const FEATURES=6;
+function vector(p){return [1,p.mastery,Math.min(p.evidence/20,1),p.uncertainty,Math.min(p.sessions/8,1),Math.max(-1,Math.min(1,p.last_gain||0))]}
+const dot=(a,b)=>a.reduce((s,v,i)=>s+v*b[i],0);
+function solve(A,b){const n=b.length,m=A.map((r,i)=>[...r,b[i]]);for(let i=0;i<n;i++){let best=i;for(let j=i+1;j<n;j++)if(Math.abs(m[j][i])>Math.abs(m[best][i]))best=j;[m[i],m[best]]=[m[best],m[i]];const d=m[i][i];if(Math.abs(d)<1e-12)return b.map(()=>0);for(let k=i;k<=n;k++)m[i][k]/=d;for(let j=0;j<n;j++)if(j!==i){const v=m[j][i];for(let k=i;k<=n;k++)m[j][k]-=v*m[i][k]}}return m.map(r=>r[n])}
+function fit(rows){return ACTIONS.map((action,index)=>{const samples=rows.filter(r=>r.action===index),A=Array.from({length:FEATURES},(_,i)=>Array.from({length:FEATURES},(_,j)=>i===j?1:0)),b=Array(FEATURES).fill(0);for(const r of samples){for(let i=0;i<FEATURES;i++){b[i]+=r.x[i]*r.reward;for(let j=0;j<FEATURES;j++)A[i][j]+=r.x[i]*r.x[j]}}return {action,index,n:samples.length,weights:solve(A,b)}})}
+function heuristic(p,available){const preference=p.evidence<3?['explain','example','practice','review']:p.mastery<.45?['example','explain','review','practice']:p.mastery<.7?['practice','example','review','explain']:['review','practice','example','explain'];return ACTIONS.indexOf(preference.find(a=>available.includes(ACTIONS.indexOf(a))))}
+function decide(p,available,rows,mode,random=Math.random){const base=heuristic(p,available),models=fit(rows),learners=new Set(rows.map(r=>r.trainee_id)).size,ready=rows.length>=30&&learners>=5&&available.every(i=>models[i].n>=3);const x=vector(p);let best=base;if(mode==='bandit'&&ready)best=[...available].sort((a,b)=>dot(models[b].weights,x)-dot(models[a].weights,x)||a-b)[0];const epsilon=mode==='bandit'?.15:0;const probabilities=ACTIONS.map((_,i)=>available.includes(i)?epsilon/available.length+(i===best?1-epsilon:0):0);let cursor=random(),selected=available[available.length-1];for(const i of available){cursor-=probabilities[i];if(cursor<0){selected=i;break}}
+ return {action:selected,baseline:base,probability:probabilities[selected],probabilities,ready,method:mode==='heuristic'?'heuristic':ready?'contextual_bandit':'bandit_warmup',x,scores:available.map(i=>({action:ACTIONS[i],estimate:dot(models[i].weights,x),samples:models[i].n})),samples:rows.length,learners}}
+// Self-normalized IPS is descriptive OPE, not a causal guarantee. Only logs with overlap qualify.
+function evaluate(rows,target){let sw=0,sw2=0,sr=0,matched=0;for(const r of rows){if(target(r)!==r.action||r.probability<=0)continue;const w=1/r.probability;sw+=w;sw2+=w*w;sr+=w*r.reward;matched++}return {estimate:sw?sr/sw:null,matched,effective_samples:sw2?sw*sw/sw2:0,total:rows.length}}
+module.exports={ACTIONS,FEATURES,vector,dot,fit,heuristic,decide,evaluate};

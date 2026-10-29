@@ -1,0 +1,44 @@
+'use strict';
+require('./sqlite-test-adapter.cjs');
+const assert=require('node:assert/strict'),crypto=require('crypto');
+process.env.NODE_ENV='development';process.env.PORT='3199';process.env.DATA_DIR='/tmp/british-v26-test';
+process.env.GOOGLE_SHEETS_SPREADSHEET_ID='';process.env.GOOGLE_SERVICE_ACCOUNT_FILE='';
+process.env.PLATFORM_SCRIPT_URL='https://script.google.com/macros/s/TestBridge/exec';process.env.PLATFORM_BRIDGE_SECRET='test-only-secret-123456789012345678901234';process.env.PLATFORM_PUBLIC_URL='https://platform.example.com';
+const networkFetch=global.fetch,files=new Map(),mails=[];let mailFailure=false;
+global.fetch=async(url,opts={})=>{if(String(url)!==process.env.PLATFORM_SCRIPT_URL)return networkFetch(url,opts);
+ const e=JSON.parse(opts.body),expected=crypto.createHmac('sha256',process.env.PLATFORM_BRIDGE_SECRET).update(e.payload).digest('base64');assert.equal(e.signature,expected);const p=JSON.parse(e.payload);let body={success:true};
+ if(p.action==='platformCredentials'){if(mailFailure)body={success:false,error:'Daily email quota exhausted'};else mails.push(p)}
+ if(p.action==='platformUpload'){const id='file-'+files.size;files.set(id,{name:p.name,mime:p.mime,base64:p.base64});body={success:true,id,url:'https://drive.google.com/file/d/'+id+'/view'}}
+ if(p.action==='platformDownload')body={success:true,...files.get(p.id)};
+ if(p.action==='platformHealth')body={success:true,folder:'platform',remainingMailQuota:99};return new Response(JSON.stringify(body),{headers:{'Content-Type':'application/json'}});
+};
+const db=require('../db'),bcrypt=require('bcryptjs');
+for(const [id,role]of [[1,'admin'],[2,'trainee'],[3,'trainee']])db.prepare('INSERT INTO users(id,username,password_hash,role,display_name) VALUES(?,?,?,?,?)').run(id,'user'+id,bcrypt.hashSync('TestPassword123!',4),role,'Test '+id);
+db.prepare("INSERT INTO trainees(id,name,email,user_id) VALUES(1,'Student','student@example.com',2),(2,'Other','other@example.com',3)").run();db.prepare("INSERT INTO courses(id,title,capacity) VALUES(1,'ICDL',17)").run();db.prepare('INSERT INTO enrollments(course_id,trainee_id) VALUES(1,1),(1,2)').run();
+require('../server');
+const base='http://127.0.0.1:3199';
+(async()=>{await new Promise(r=>setTimeout(r,100));async function request(url,{method='GET',body,cookie}={}){const r=await fetch(base+url,{method,headers:{'Content-Type':'application/json',...(cookie?{Cookie:cookie}:{})},body:body?JSON.stringify(body):undefined});const bytes=Buffer.from(await r.arrayBuffer());let data;try{data=JSON.parse(bytes.toString())}catch{data=bytes}return {status:r.status,data,cookie:r.headers.get('set-cookie')?.split(';')[0]}}
+ const login=async n=>(await request('/api/login',{method:'POST',body:{username:'user'+n,password:'TestPassword123!'}})).cookie;
+ const admin=await login(1),student=await login(2);assert.ok(admin);assert.ok(student);
+ const call=(url,body,method=body?'POST':'GET',cookie=admin)=>request(url,{method,body,cookie});
+ let r=await call('/api/admin/edit/courses/1',{title:'ICDL Updated',capacity:47,display_number:'47',description:'New description',starts_on:'2026-11-01',ends_on:'2026-11-05'},'PUT');assert.equal(r.status,200);
+ r=await call('/api/public/courses');assert.equal(r.data[0].capacity,47);assert.equal(r.data[0].display_number,'47');
+ assert.equal((await call('/api/admin/edit/courses/1',{capacity:1},'PUT')).status,400);
+ assert.equal((await call('/api/admin/edit/courses/1',{capacity:80},'PUT',student)).status,403);
+ r=await call('/api/trainees',{name:'Auto Account',email:'auto@example.com'});assert.equal(r.status,201);assert.equal(r.data.email_sent,true);const tid=r.data.id;assert.equal(mails.length,1);assert.ok(mails[0].password.length>=12);
+ const account=db.prepare('SELECT u.* FROM users u JOIN trainees t ON u.id=t.user_id WHERE t.id=?').get(tid);assert.equal(mails[0].username,account.username);
+ r=await call('/api/trainees/'+tid,{name:'Auto Account',email:'auto@example.com',username:account.username,password:''},'PUT');assert.equal(r.status,200);assert.equal(mails.length,1);
+ r=await call('/api/trainees/'+tid+'/send-credentials',{});assert.equal(r.data.email_sent,true);assert.equal(mails.length,2);
+ mailFailure=true;r=await call('/api/trainees',{name:'Saved Despite Mail Failure',email:'fail@example.com'});assert.equal(r.data.email_status,'failed');assert.ok(db.prepare('SELECT id FROM trainees WHERE id=?').get(r.data.id));mailFailure=false;
+ r=await call('/api/public/applications',{applicantName:'Approved Student',email:'approved@example.com',phone:'01234567890',course_id:1,attachment_name:'application.pdf',attachment_data:'data:application/pdf;base64,'+Buffer.from('PDF TEST').toString('base64')});assert.equal(r.status,201,JSON.stringify(r.data));const aid=r.data.id;
+ r=await call('/api/applications/'+aid,{status:'approved'},'PATCH');assert.equal(r.status,200);assert.equal(r.data.email_sent,true);
+ r=await call('/api/work/activities/tasks',{title:'Task',course_id:1,status:'نشط',use_icdl:true});assert.equal(r.status,201);const task=r.data.id;
+ r=await call('/api/work/activities/tasks',null,'GET',student);const file=r.data[0].file_id;assert.ok(file);assert.equal((await call(`/api/work/${task}/file/${file}`,null,'GET',student)).status,200);
+ r=await call('/api/work/'+task+'/submit',{answer:'My answer'},'POST',student);assert.equal(r.status,201);const submission=r.data.id;
+ r=await call('/api/admin/edit/activities/'+task,{title:'Edited Task',description:'New instructions',due_date:'2099-01-01',status:'نشط'},'PUT');assert.equal(r.status,200);assert.ok(db.prepare('SELECT id FROM activity_submissions WHERE id=?').get(submission));
+ r=await call('/api/admin/edit/activities/'+task,{file:{name:'new.docx',data:Buffer.from('New file').toString('base64')}},'PUT');assert.equal(r.status,200);assert.notEqual(db.prepare('SELECT file_id FROM training_activities WHERE id=?').get(task).file_id,file);
+ r=await call('/api/library',{title:'Cloud reference',original_name:'reference.pdf',data_url:'data:application/pdf;base64,'+Buffer.from('Reference').toString('base64'),course_id:1});assert.equal(r.status,201);assert.equal((await call('/api/library/'+r.data.id+'/download',null,'GET',student)).data.toString(),'Reference');
+ assert.equal((await call('/api/admin/google-status')).data.folder,'platform');
+ console.log('PASS V26: course fields/count/code, admin-only editing, automatic accounts and email, idempotence, resend, mail failures, application approval/attachment, Drive task/library files, edit preserving submissions, bridge signing. External services mocked; no real emails sent.');
+ process.exit(0);
+})().catch(e=>{console.error(e);process.exit(1)});

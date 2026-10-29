@@ -1,0 +1,27 @@
+{
+  "name": "british-institute-tanta",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local training management platform starter for Central Training Administration",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node tests/activity-workflow.cjs && node tests/platform-v26.cjs && node tests/apps-script-bridge.cjs && node tests/sheets-defaults.cjs && node tests/platform-chat.cjs && node tests/learning-v29.cjs && node tests/learning-persistence.cjs && node tests/analytics-reports.cjs && node tests/ai-v31.cjs && node tests/adaptive-v32.cjs && node tests/sheets-batch-v32.cjs && node tests/dqn-worker-v32.cjs && node tests/queue-v33.cjs && node tests/flush-v33.cjs",
+    "worker": "node local-worker/worker.cjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.8.1",
+    "dotenv": "^18.0.8",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "googleapis": "^144.0.0",
+    "helmet": "^8.0.0",
+    "mammoth": "^1.11.0",
+    "pdf-parse": "^1.1.1"
+  }
+}
