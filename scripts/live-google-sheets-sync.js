@@ -1,6 +1,7 @@
 'use strict';
 /** Google Sheets is the durable data store. SQLite is an in-memory query engine only. */
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const { google } = require('googleapis');
 const db = require('../db');
 
@@ -20,7 +21,32 @@ let refreshTimer = null;
 let refreshRunning = false;
 const REFRESH_INTERVAL_MS = Math.max(3000, Number(process.env.GOOGLE_SHEETS_REFRESH_INTERVAL_MS || 5000));
 const quoteSheet = name => `'${name.replaceAll("'", "''")}'`;
+const ENCRYPTION_PREFIX = 'enc:v1:';
+const encryptionSecret = String(process.env.DATA_ENCRYPTION_KEY || '').trim();
+const encryptionKey = encryptionSecret ? crypto.createHash('sha256').update(encryptionSecret, 'utf8').digest() : null;
 const safeCell = value => value === null || value === undefined ? '' : (typeof value === 'object' ? JSON.stringify(value) : String(value));
+function encryptCell(value) {
+  const plain = safeCell(value);
+  if (!plain || !encryptionKey) return plain;
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', encryptionKey, iv);
+  const encrypted = Buffer.concat([cipher.update(plain, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return ENCRYPTION_PREFIX + [iv, tag, encrypted].map(x => x.toString('base64url')).join('.');
+}
+function decryptCell(value) {
+  if (typeof value !== 'string' || !value.startsWith(ENCRYPTION_PREFIX)) return value;
+  if (!encryptionKey) throw new Error('Encrypted Google Sheets data found but DATA_ENCRYPTION_KEY is not configured.');
+  try {
+    const [iv64, tag64, data64] = value.slice(ENCRYPTION_PREFIX.length).split('.');
+    if (!iv64 || !tag64 || !data64) throw new Error('invalid encrypted cell');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', encryptionKey, Buffer.from(iv64, 'base64url'));
+    decipher.setAuthTag(Buffer.from(tag64, 'base64url'));
+    return Buffer.concat([decipher.update(Buffer.from(data64, 'base64url')), decipher.final()]).toString('utf8');
+  } catch (err) {
+    throw new Error('Unable to decrypt Google Sheets data. Verify DATA_ENCRYPTION_KEY has not changed.');
+  }
+}
 
 function getSheets() {
   if (!configured) throw new Error('Google Sheets is not configured. Set GOOGLE_SHEETS_SPREADSHEET_ID and GOOGLE_SERVICE_ACCOUNT_FILE.');
@@ -102,7 +128,7 @@ async function loadSheetsIntoMemory({ createMissing = false } = {}) {
               if(definition.notnull && /TEXT/i.test(definition.type)) return '';
               return null;
             }
-            const value = row[ix];
+            const value = decryptCell(row[ix]);
             return typeof value === 'object' ? JSON.stringify(value) : value;
           }));
         }
@@ -121,7 +147,14 @@ async function initializeGoogleSheetsStore() {
     return;
   }
   await loadSheetsIntoMemory({ createMissing: true });
-  console.log(`[Google Sheets] Loaded authoritative data for ${getTables().length} tables.`);
+  console.log(`[Google Sheets] Loaded authoritative data for ${getTables().length} tables.${encryptionKey ? ' Cell encryption is enabled.' : ''}`);
+  // One-time/continuous migration: when encryption is enabled, immediately rewrite the authoritative
+  // snapshot so existing plaintext rows become AES-256-GCM ciphertext at rest in Google Sheets.
+  if (encryptionKey) {
+    dirty = true; writeVersion += 1;
+    await syncNow();
+    if (persistenceError) throw new Error('Encrypted Google Sheets migration failed.');
+  }
   // Poll external edits/deletions. Skip while local writes are waiting to be uploaded,
   // otherwise a refresh could overwrite a just-created course before it reaches Sheets.
   if (refreshTimer) clearInterval(refreshTimer);
@@ -161,7 +194,7 @@ async function syncNow() {
     const payload = tables.map(table => {
       const columns = schemaColumns(table);
       const rows = db.prepare(`SELECT * FROM "${table.replaceAll('"', '""')}"`).all();
-      return { table, values: [columns, ...rows.map(row => columns.map(c => safeCell(row[c])))] };
+      return { table, values: [columns, ...rows.map(row => columns.map(c => encryptCell(row[c])))] };
     });
     const ranges = payload.map(p => `${quoteSheet(p.table)}!A:ZZ`);
     if (ranges.length) await api.spreadsheets.values.batchClear({ spreadsheetId, requestBody: { ranges } });
