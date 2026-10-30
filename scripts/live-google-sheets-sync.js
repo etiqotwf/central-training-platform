@@ -24,10 +24,11 @@ const quoteSheet = name => `'${name.replaceAll("'", "''")}'`;
 const ENCRYPTION_PREFIX = 'enc:v1:';
 const encryptionSecret = String(process.env.DATA_ENCRYPTION_KEY || '').trim();
 const encryptionKey = encryptionSecret ? crypto.createHash('sha256').update(encryptionSecret, 'utf8').digest() : null;
+let storageEncrypted = Boolean(encryptionKey);
 const safeCell = value => value === null || value === undefined ? '' : (typeof value === 'object' ? JSON.stringify(value) : String(value));
 function encryptCell(value) {
   const plain = safeCell(value);
-  if (!plain || !encryptionKey) return plain;
+  if (!plain || !encryptionKey || !storageEncrypted) return plain;
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', encryptionKey, iv);
   const encrypted = Buffer.concat([cipher.update(plain, 'utf8'), cipher.final()]);
@@ -147,7 +148,11 @@ async function initializeGoogleSheetsStore() {
     return;
   }
   await loadSheetsIntoMemory({ createMissing: true });
-  console.log(`[Google Sheets] Loaded authoritative data for ${getTables().length} tables.${encryptionKey ? ' Cell encryption is enabled.' : ''}`);
+  // Persist the chosen at-rest mode in the database so it survives Render restarts.
+  const modeRow = db.prepare("SELECT control_value FROM platform_control WHERE control_key='storage_encrypted'").get();
+  if (modeRow) storageEncrypted = modeRow.control_value !== '0';
+  else db.prepare("INSERT OR REPLACE INTO platform_control(control_key,control_value,updated_at) VALUES('storage_encrypted',?,CURRENT_TIMESTAMP)").run(storageEncrypted ? '1' : '0');
+  console.log(`[Google Sheets] Loaded authoritative data for ${getTables().length} tables. At-rest mode: ${storageEncrypted ? 'encrypted' : 'decrypted'}.`);
   // One-time/continuous migration: when encryption is enabled, immediately rewrite the authoritative
   // snapshot so existing plaintext rows become AES-256-GCM ciphertext at rest in Google Sheets.
   if (encryptionKey) {
@@ -230,4 +235,14 @@ async function flushGoogleSheetsWrites() {
     } else await new Promise(resolve => setTimeout(resolve, 50));
   }
 }
-module.exports = { flushGoogleSheetsWrites, initializeGoogleSheetsStore, scheduleGoogleSheetsSync, syncNow, refreshFromGoogleSheets: loadSheetsIntoMemory };
+async function setStorageEncryption(enabled) {
+  if (enabled && !encryptionKey) throw new Error('DATA_ENCRYPTION_KEY is not configured.');
+  storageEncrypted = Boolean(enabled);
+  db.prepare("INSERT OR REPLACE INTO platform_control(control_key,control_value,updated_at) VALUES('storage_encrypted',?,CURRENT_TIMESTAMP)").run(storageEncrypted ? '1' : '0');
+  dirty = true; writeVersion += 1;
+  await syncNow();
+  if (persistenceError) throw persistenceError;
+  return { encrypted: storageEncrypted };
+}
+function getStorageEncryptionStatus(){ return { encrypted: storageEncrypted, configured: Boolean(encryptionKey) }; }
+module.exports = { flushGoogleSheetsWrites, initializeGoogleSheetsStore, scheduleGoogleSheetsSync, syncNow, refreshFromGoogleSheets: loadSheetsIntoMemory, setStorageEncryption, getStorageEncryptionStatus };

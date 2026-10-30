@@ -141,3 +141,19 @@ for (const [name, definition] of [["test_url", "TEXT DEFAULT ''"], ["test_enable
 const activityColumns = db.prepare("PRAGMA table_info(training_activities)").all().map(c => c.name);
 if (!activityColumns.includes("external_url")) db.exec("ALTER TABLE training_activities ADD COLUMN external_url TEXT DEFAULT ''");
 module.exports = db;
+
+// Persistent platform control plane. These tables are mirrored to Google Sheets like the rest of the database.
+db.exec(`
+CREATE TABLE IF NOT EXISTS platform_control (
+  control_key TEXT PRIMARY KEY,
+  control_value TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS platform_permissions (
+  module_key TEXT NOT NULL,
+  role TEXT NOT NULL CHECK(role IN ('admin','trainer','trainee')),
+  enabled INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(module_key, role)
+);
+`);

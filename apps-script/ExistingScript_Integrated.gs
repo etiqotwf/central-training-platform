@@ -2556,7 +2556,7 @@ function platformBridge_(e) {
       if(f.getSize()>8388608)throw new Error('File exceeds 8 MB.');
       return platformJson_({success:true,name:f.getName(),mime:f.getMimeType(),base64:Utilities.base64Encode(f.getBlob().getBytes())});
     }
-    if(['platformUpload','platformCredentials'].indexOf(p.action)<0)throw new Error('Unknown action.');
+    if(['platformUpload','platformCredentials','platformContact'].indexOf(p.action)<0)throw new Error('Unknown action.');
     lock=LockService.getScriptLock();lock.waitLock(30000);
     var cache=CacheService.getScriptCache(),key='platform:'+p.requestId,prior=cache.get(key);
     if(prior)return platformJson_(JSON.parse(prior));
@@ -2568,6 +2568,12 @@ function platformBridge_(e) {
       if(!bytes.length||bytes.length>8388608)throw new Error('Maximum file size is 8 MB.');
       var file=folder.createFile(Utilities.newBlob(bytes,String(p.mime||'application/octet-stream'),name));
       result={success:true,id:file.getId(),url:file.getUrl()};
+    } else if(p.action==='platformContact') {
+      var replyTo=String(p.replyTo||'').trim(),msg=String(p.message||'').trim(),subject=String(p.subject||'استفسار من منصة الإدارة المركزية للتدريب').slice(0,160);
+      if(!/^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(replyTo)||msg.length<10||msg.length>5000)throw new Error('Invalid contact message.');
+      if(MailApp.getRemainingDailyQuota()<1)throw new Error('Daily email quota exhausted. Try again later.');
+      MailApp.sendEmail({to:'dtctantaformal@gmail.com',replyTo:replyTo,subject:subject,name:'منصة الإدارة المركزية للتدريب',body:'رسالة واردة من منصة الإدارة المركزية للتدريب\n\nالمرسل: '+String(p.displayName||'مستخدم المنصة')+'\nبريد الرد: '+replyTo+'\n\n'+msg});
+      result={success:true,sent:true};
     } else {
       var email=String(p.email||'').trim();
       if(!/^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(email)||!p.username||!p.password)throw new Error('Invalid recipient or credentials.');

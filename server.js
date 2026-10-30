@@ -5,8 +5,9 @@ const helmet = require("helmet");
 const bcrypt = require("bcryptjs");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 const db = require("./db");
-const { initializeGoogleSheetsStore, scheduleGoogleSheetsSync, flushGoogleSheetsWrites } = require("./scripts/live-google-sheets-sync");
+const { initializeGoogleSheetsStore, scheduleGoogleSheetsSync, flushGoogleSheetsWrites, setStorageEncryption, getStorageEncryptionStatus } = require("./scripts/live-google-sheets-sync");
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -64,6 +65,90 @@ function handleError(res, err) {
   console.error(err);
   return res.status(500).json({ error: "حدث خطأ داخلي. راجع سجل الخادم." });
 }
+
+
+const CONTROL_MODULES = [
+  ['dashboard','الرئيسية'],['reports','التقارير والإحصائيات'],['courses','الدورات والبرامج'],['people','المتدربون والمحاضرون'],
+  ['attendance','الحضور'],['sessions','البث المباشر'],['activities','المهام والواجبات والاختبارات'],['evaluations','التقييمات'],
+  ['library','المكتبة والخطة التدريبية'],['archive','الأرشيف وقواعد البيانات'],['gallery','معرض الدورات'],['ai','الذكاء الاصطناعي'],
+  ['notifications','التواصل والإشعارات'],['applications','طلبات الترشح'],['certificates','الشهادات'],['settings','إعدادات المدير']
+];
+const moduleForApi = pathName => {
+  const p=String(pathName||'');
+  if (/^\/(dashboard|reports)/.test(p)) return 'reports';
+  if (/^\/(courses|programs|payments)/.test(p)) return 'courses';
+  if (/^\/(trainees|trainers|users)/.test(p)) return 'people';
+  if (/^\/attendance/.test(p)) return 'attendance';
+  if (/^\/sessions/.test(p)) return 'sessions';
+  if (/^\/(tasks|assignments|tests)/.test(p)) return 'activities';
+  if (/evaluation|rating/.test(p)) return 'evaluations';
+  if (/^\/(library|training-plan)/.test(p)) return 'library';
+  if (/^\/(archive|sheet-)/.test(p)) return 'archive';
+  if (/^\/facebook-courses/.test(p)) return 'gallery';
+  if (/^\/(ai|adaptive|learning-path|learning-lab)/.test(p)) return 'ai';
+  if (/^\/(notifications|chat)/.test(p)) return 'notifications';
+  if (/^\/applications/.test(p)) return 'applications';
+  if (/^\/certificates/.test(p)) return 'certificates';
+  return null;
+};
+function masterPasswordOk(input){
+  const expected=String(process.env.MASTER_ADMIN_PASSWORD||'');
+  const actual=String(input||'');
+  if(expected.length<12 || actual.length!==expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(actual),Buffer.from(expected));
+}
+function requireMaster(req,res,next){
+  if(!req.session.user || req.session.user.role!=='admin') return res.status(403).json({error:'هذه الوظيفة متاحة للمدير فقط.'});
+  if(req.session.masterControlUntil && req.session.masterControlUntil>Date.now()) return next();
+  return res.status(403).json({error:'يلزم فتح صلاحيات التحكم الرئيسية بكلمة المرور.'});
+}
+function permissionEnabled(moduleKey,userRole){
+  if(!moduleKey) return true;
+  const row=one('SELECT enabled FROM platform_permissions WHERE module_key=? AND role=?',moduleKey,userRole);
+  return !row || Number(row.enabled)===1;
+}
+// Enforce module switches on the API as well as the interface. The temporarily unlocked master administrator bypasses switches.
+app.use('/api',(req,res,next)=>{
+  if(!req.session.user || /^\/(setup|setup-status|login|logout|me|public|master-control|platform-permissions|storage-encryption|contact-message)/.test(req.path)) return next();
+  if(req.session.user.role==='admin' && req.session.masterControlUntil>Date.now()) return next();
+  const moduleKey=moduleForApi(req.path);
+  if(moduleKey && !permissionEnabled(moduleKey,req.session.user.role)) return res.status(403).json({error:'تم إيقاف صلاحية هذا القسم لحسابك بواسطة مدير التحكم.'});
+  next();
+});
+
+app.post('/api/master-control/unlock',auth,role('admin'),(req,res)=>{
+  req.session.masterAttempts=(req.session.masterAttempts||0)+1;
+  if(req.session.masterAttempts>8) return res.status(429).json({error:'محاولات كثيرة. سجّل الخروج ثم أعد المحاولة لاحقًا.'});
+  if(!masterPasswordOk(req.body?.password)) return res.status(403).json({error:'كلمة مرور التحكم غير صحيحة.'});
+  req.session.masterAttempts=0; req.session.masterControlUntil=Date.now()+20*60*1000;
+  res.json({ok:true,unlockedUntil:req.session.masterControlUntil});
+});
+app.post('/api/master-control/lock',auth,role('admin'),(req,res)=>{delete req.session.masterControlUntil;res.json({ok:true})});
+app.get('/api/storage-encryption',auth,role('admin'),(req,res)=>res.json(getStorageEncryptionStatus()));
+app.post('/api/storage-encryption',auth,requireMaster,async(req,res)=>{
+  try{const out=await setStorageEncryption(Boolean(req.body?.encrypted));res.json({ok:true,...out,message:out.encrypted?'تم تشفير بيانات الجداول في مصدر التخزين.':'تم فك تشفير بيانات الجداول في مصدر التخزين، والمنصة مستمرة في العمل بصورة طبيعية.'})}
+  catch(e){handleError(res,e)}
+});
+app.get('/api/platform-permissions',auth,(req,res)=>{
+  const rows=all('SELECT module_key,role,enabled FROM platform_permissions');
+  res.json({modules:CONTROL_MODULES.map(([key,label])=>({key,label})),permissions:rows,masterUnlocked:!!(req.session.masterControlUntil>Date.now())});
+});
+app.put('/api/platform-permissions',auth,requireMaster,(req,res)=>{
+  const moduleKey=clean(req.body?.module_key),targetRole=clean(req.body?.role),enabled=req.body?.enabled?1:0;
+  if(!CONTROL_MODULES.some(([k])=>k===moduleKey)||!validRole(targetRole)) return res.status(400).json({error:'صلاحية غير صحيحة.'});
+  q(`INSERT INTO platform_permissions(module_key,role,enabled,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP)
+     ON CONFLICT(module_key,role) DO UPDATE SET enabled=excluded.enabled,updated_at=CURRENT_TIMESTAMP`,moduleKey,targetRole,enabled);
+  res.json({ok:true,module_key:moduleKey,role:targetRole,enabled:!!enabled});
+});
+app.post('/api/contact-message',auth,async(req,res)=>{
+  const email=clean(req.body?.email).toLowerCase(),subject=clean(req.body?.subject),message=clean(req.body?.message);
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({error:'اكتب بريدًا إلكترونيًا صحيحًا ليتم الرد عليك.'});
+  if(message.length<10 || message.length>5000) return res.status(400).json({error:'اكتب رسالة واضحة من 10 إلى 5000 حرف.'});
+  try{
+    await googleBridge.call('platformContact',{replyTo:email,subject:subject.slice(0,160)||'استفسار من منصة الإدارة المركزية للتدريب',message,displayName:req.session.user.display_name||req.session.user.username});
+    res.json({ok:true,message:'تم إرسال رسالتك بنجاح. سيقوم فريق وحدة التطوير والذكاء الاصطناعي بالرد على بريدك الإلكتروني في أقرب وقت ممكن.'});
+  }catch(e){res.status(503).json({error:'تعذر إرسال الرسالة حاليًا: '+String(e.message).slice(0,250)})}
+});
 
 
 const googleBridge = require('./google-bridge');
