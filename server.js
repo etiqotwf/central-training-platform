@@ -155,7 +155,8 @@ app.post('/api/contact-message',auth,async(req,res)=>{
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({error:'اكتب بريدًا إلكترونيًا صحيحًا ليتم الرد عليك.'});
   if(message.length<10 || message.length>5000) return res.status(400).json({error:'اكتب رسالة واضحة من 10 إلى 5000 حرف.'});
   try{
-    await googleBridge.call('platformContact',{replyTo:email,subject:subject.slice(0,160)||'استفسار من منصة الإدارة المركزية للتدريب',message,displayName:req.session.user.display_name||req.session.user.username});
+    const senderName=clean(req.session.user.display_name||req.session.user.username)||'مستخدم المنصة';
+    await googleBridge.call('platformContact',{replyTo:email,email,name:senderName,displayName:senderName,subject:subject.slice(0,160)||'استفسار من منصة الإدارة المركزية للتدريب',message});
     res.json({ok:true,message:'تم إرسال رسالتك بنجاح. سيقوم فريق وحدة التطوير والذكاء الاصطناعي بالرد على بريدك الإلكتروني في أقرب وقت ممكن.'});
   }catch(e){console.error('Contact message failed:',e.message);res.status(503).json({error:'تعذر إرسال الرسالة حاليًا: '+String(e.message).slice(0,300)})}
 });
