@@ -140,6 +140,16 @@ app.put('/api/platform-permissions',auth,requireMaster,(req,res)=>{
      ON CONFLICT(module_key,role) DO UPDATE SET enabled=excluded.enabled,updated_at=CURRENT_TIMESTAMP`,moduleKey,targetRole,enabled);
   res.json({ok:true,module_key:moduleKey,role:targetRole,enabled:!!enabled});
 });
+app.get('/api/platform-bridge-health',auth,role('admin'),async(req,res)=>{
+  try{
+    const result=await googleBridge.call('platformHealth');
+    res.json({ok:true,bridge:true,folder:result.folder||'',remainingMailQuota:result.remainingMailQuota});
+  }catch(e){
+    console.error('Platform bridge health failed:',e.message);
+    res.status(503).json({error:'تعذر الاتصال بخدمة Google: '+String(e.message).slice(0,300)});
+  }
+});
+
 app.post('/api/contact-message',auth,async(req,res)=>{
   const email=clean(req.body?.email).toLowerCase(),subject=clean(req.body?.subject),message=clean(req.body?.message);
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({error:'اكتب بريدًا إلكترونيًا صحيحًا ليتم الرد عليك.'});
@@ -147,7 +157,7 @@ app.post('/api/contact-message',auth,async(req,res)=>{
   try{
     await googleBridge.call('platformContact',{replyTo:email,subject:subject.slice(0,160)||'استفسار من منصة الإدارة المركزية للتدريب',message,displayName:req.session.user.display_name||req.session.user.username});
     res.json({ok:true,message:'تم إرسال رسالتك بنجاح. سيقوم فريق وحدة التطوير والذكاء الاصطناعي بالرد على بريدك الإلكتروني في أقرب وقت ممكن.'});
-  }catch(e){res.status(503).json({error:'تعذر إرسال الرسالة حاليًا: '+String(e.message).slice(0,250)})}
+  }catch(e){console.error('Contact message failed:',e.message);res.status(503).json({error:'تعذر إرسال الرسالة حاليًا: '+String(e.message).slice(0,300)})}
 });
 
 
