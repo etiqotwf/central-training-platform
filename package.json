@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node tests/activity-workflow.cjs && node tests/platform-v26.cjs && node tests/apps-script-bridge.cjs && node tests/sheets-defaults.cjs && node tests/platform-chat.cjs && node tests/learning-v29.cjs && node tests/learning-persistence.cjs && node tests/analytics-reports.cjs && node tests/ai-v31.cjs && node tests/adaptive-v32.cjs && node tests/sheets-batch-v32.cjs && node tests/dqn-worker-v32.cjs && node tests/queue-v33.cjs && node tests/flush-v33.cjs && node tests/course-workflow-v37.cjs && node tests/course-workflow-v38.cjs && node tests/sheets-protection-v39.cjs && node tests/central-v41-integration.cjs && node tests/central-v41-encryption.cjs",
+    "test": "node tests/activity-workflow.cjs && node tests/platform-v26.cjs && node tests/apps-script-bridge.cjs && node tests/sheets-defaults.cjs && node tests/platform-chat.cjs && node tests/learning-v29.cjs && node tests/learning-persistence.cjs && node tests/analytics-reports.cjs && node tests/ai-v31.cjs && node tests/adaptive-v32.cjs && node tests/sheets-batch-v32.cjs && node tests/dqn-worker-v32.cjs && node tests/queue-v33.cjs && node tests/flush-v33.cjs && node tests/course-workflow-v37.cjs && node tests/course-workflow-v38.cjs && node tests/sheets-protection-v39.cjs && node tests/central-v41-integration.cjs && node tests/central-v41-encryption.cjs && node tests/knowledge-workspace-v42.cjs && node tests/knowledge-engine-v43.cjs",
     "worker": "node local-worker/worker.cjs"
   },
   "engines": {
