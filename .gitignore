@@ -22,10 +22,14 @@ local-worker-config*.json
 !.env.example
 uploads/
 storage/
+backups/
+logs/
+.cache/
 *.sqlite-*
 *.db
 *.pem
 *.key
 *credentials*.json
 migrate-facebook-storage.js
+local-worker-config.json
 local-worker/worker-old-backup.txt
