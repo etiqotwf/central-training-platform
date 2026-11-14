@@ -104,7 +104,7 @@ module.exports=function({app,db,q,one,all,auth,role,aiGenerate,flush=async()=>{}
    if(!existing&&one("SELECT count(*) n FROM ai_knowledge_documents WHERE status='indexed'").n>=80)fail('وصلت المكتبة إلى الحد التشغيلي الحالي (80 مستنداً). أزل فهرسة مستندات قديمة أولاً.',413);
    const currentLibraryChars=Number(one("SELECT coalesce(sum(character_count),0) n FROM ai_knowledge_documents WHERE status='indexed' AND sha256<>?",sha256).n)||0;
    if(currentLibraryChars+extracted.text.length>20000000)fail('وصلت مكتبة المعرفة إلى الحد التشغيلي الحالي (20 مليون حرف). أزل فهرسة مستندات غير مستخدمة أولاً.',413);
-   const storageInfo=knowledgeStorageInfo();if(!storageInfo.configured)fail('تخزين الملفات الأصلية غير مهيأ. اضبط Google Drive / حساب الخدمة قبل رفع المستندات.',503);
+   const storageInfo=knowledgeStorageInfo();if(!storageInfo.configured)fail('تخزين النسخ الأصلية لمكتبة المعرفة غير مهيأ. اضبط KNOWLEDGE_SCRIPT_URL وKNOWLEDGE_BRIDGE_SECRET في Render، واضبط KNOWLEDGE_FOLDER_ID وKNOWLEDGE_BRIDGE_SECRET في مشروع Apps Script الخاص بالمكتبة.',503);
    if(bytes.length>Number(storageInfo.maxFileMb||0)*1024*1024)fail(`طريقة التخزين الحالية تسمح بملف حتى ${Number(storageInfo.maxFileMb)||0} ميجابايت. فعّل حساب خدمة Google Drive للملفات الأكبر.`,413);
    let documentId;
    if(existing&&existing.status==='archived'){

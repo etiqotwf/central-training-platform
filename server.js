@@ -163,6 +163,7 @@ app.post('/api/contact-message',auth,async(req,res)=>{
 
 
 const googleBridge = require('./google-bridge');
+const knowledgeBridge = require('./knowledge-bridge');
 const credentialMail = require('./credential-mail')({app,db,q,one,all,auth,role});
 const DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_UPLOAD_FOLDER_ID || "13xUHOP92OyWO0KIJvxu1jFE2ijFbg7_u";
 async function uploadApplicationAttachment(name, mimeType, base64) {
@@ -709,6 +710,68 @@ app.delete("/api/batches/:id", auth, role("admin"), (req,res)=>{q("DELETE FROM t
 // Library resources: file bytes are stored on disk, metadata in SQLite. Uploads are limited to 50 MiB.
 const uploadDir=path.join(process.env.DATA_DIR?path.resolve(process.env.DATA_DIR):__dirname+"/data","uploads");
 if(!fs.existsSync(uploadDir))fs.mkdirSync(uploadDir,{recursive:true});
+// Knowledge originals stay private in Google Drive when a service account or the signed Apps Script bridge is configured.
+// The service-account path supports 50 MiB files; the legacy Apps Script bridge is limited to 8 MiB.
+function knowledgeServiceAccount(){
+  const raw=String(process.env.GOOGLE_SERVICE_ACCOUNT_JSON||'').trim();
+  if(raw){const credentials=JSON.parse(raw);if(!credentials.client_email||!credentials.private_key)throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON must contain client_email and private_key.');credentials.private_key=String(credentials.private_key).replace(/\\n/g,'\n');return {credentials};}
+  const encoded=String(process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64||'').trim();
+  if(encoded){const credentials=JSON.parse(Buffer.from(encoded,'base64').toString('utf8'));if(!credentials.client_email||!credentials.private_key)throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 is invalid.');credentials.private_key=String(credentials.private_key).replace(/\\n/g,'\n');return {credentials};}
+  const keyFile=process.env.GOOGLE_SERVICE_ACCOUNT_FILE||(production?'/etc/secrets/google-service-account.json':'');
+  if(keyFile&&fs.existsSync(keyFile))return {keyFile};
+  return null;
+}
+function knowledgeStorageInfo(){
+  // In production, Knowledge originals must use their dedicated Apps Script bridge.
+  // Never fall back to the archive bridge or the archive service-account folder.
+  const hasKnowledgeBridgeConfig=Boolean(process.env.KNOWLEDGE_SCRIPT_URL||process.env.KNOWLEDGE_BRIDGE_SECRET);
+  if(knowledgeBridge.configured())return {configured:true,mode:'google-drive-knowledge-apps-script',maxFileMb:8};
+  if(hasKnowledgeBridgeConfig)return {configured:false,mode:'incomplete-knowledge-bridge',maxFileMb:0,error:'أكمل KNOWLEDGE_SCRIPT_URL وKNOWLEDGE_BRIDGE_SECRET معًا.'};
+  if(production)return {configured:false,mode:'knowledge-bridge-required',maxFileMb:0,error:'يلزم إعداد جسر Google Apps Script المخصص لمكتبة المعرفة.'};
+  try{if(knowledgeServiceAccount())return {configured:true,mode:'google-drive-service-account',maxFileMb:50};}catch(error){return {configured:false,mode:'invalid-service-account',maxFileMb:0,error:error.message};}
+  return {configured:true,mode:'local-development',maxFileMb:50};
+}
+async function knowledgeDriveClient(){
+  const credentials=knowledgeServiceAccount();if(!credentials)return null;
+  const {google}=require('googleapis');
+  const authOptions={scopes:['https://www.googleapis.com/auth/drive.file'],...credentials};
+  const auth=new google.auth.GoogleAuth(authOptions);
+  return google.drive({version:'v3',auth});
+}
+async function storeKnowledgeFile({name,mimeType,base64}){
+  const info=knowledgeStorageInfo();if(!info.configured)throw new Error('Google Drive storage is not configured.');
+  const bytes=Buffer.from(base64,'base64');
+  if(bytes.length>info.maxFileMb*1024*1024)throw new Error(`Current Google Drive connection supports files up to ${info.maxFileMb} MB.`);
+  if(info.mode==='google-drive-service-account'){
+    const drive=await knowledgeDriveClient();
+    const safeName=String(name||'document').replace(/[\\/:*?"<>|]/g,'_').slice(0,180);
+    const uploaded=await drive.files.create({requestBody:{name:`knowledge_${Date.now()}_${safeName}`,mimeType:mimeType||'application/octet-stream',parents:[process.env.GOOGLE_DRIVE_UPLOAD_FOLDER_ID||DRIVE_FOLDER_ID]},media:{mimeType:mimeType||'application/octet-stream',body:require('stream').Readable.from(bytes)},fields:'id,name'});
+    return `drive-sa:${uploaded.data.id}`;
+  }
+  if(info.mode==='google-drive-knowledge-apps-script'){
+    const uploaded=await knowledgeBridge.upload(name,mimeType,base64);
+    return `knowledge-drive:${uploaded.id}`;
+  }
+  const ext=path.extname(String(name||'')).slice(0,12).replace(/[^.\w-]/g,'');
+  const stored=`knowledge-${Date.now()}-${crypto.randomBytes(10).toString('hex')}${ext}`;
+  const target=path.join(uploadDir,stored);
+  fs.writeFileSync(target,bytes,{flag:'wx'});
+  return stored;
+}
+async function readKnowledgeFile(storedName,originalName){
+  const stored=String(storedName||'');
+  if(stored.startsWith('drive-sa:')){
+    const drive=await knowledgeDriveClient();if(!drive)throw new Error('Google service-account credentials are not configured.');
+    const file=await drive.files.get({fileId:stored.slice(8),alt:'media'},{responseType:'arraybuffer'});
+    return {bytes:Buffer.isBuffer(file.data)?file.data:Buffer.from(file.data),name:originalName||'knowledge-document'};
+  }
+  if(stored.startsWith('knowledge-drive:')){const file=await knowledgeBridge.download(stored.slice('knowledge-drive:'.length));return {bytes:file.bytes,mimeType:file.mime,name:originalName||file.name};}
+  // Legacy knowledge files uploaded through the former shared bridge remain readable.
+  if(stored.startsWith('drive:')){const file=await googleBridge.download(stored.slice(6));return {bytes:file.bytes,mimeType:file.mime,name:originalName||file.name};}
+  const safe=path.basename(stored);if(!safe||safe!==stored)throw new Error('Invalid stored file path.');
+  const target=path.resolve(uploadDir,safe);if(!target.startsWith(path.resolve(uploadDir)+path.sep))throw new Error('Invalid stored file path.');
+  return {bytes:fs.readFileSync(target),name:originalName||safe};
+}
 app.get("/api/library",auth,(req,res)=>{
  const u=req.session.user;
  if(u.role==="admin") return res.json(all(`SELECT r.id,r.title,r.kind,r.course_id,r.description,r.original_name,r.mime_type,r.size_bytes,r.created_at,c.title course_title FROM library_resources r LEFT JOIN courses c ON c.id=r.course_id ORDER BY r.created_at DESC`));
@@ -738,7 +801,7 @@ require('./admin-edit')({app,db,q,one,all,auth,role});
 require('./platform-chat')({app,db,q,one,all,auth,role});
 require('./learning')({app,db,q,one,all,auth,role});
 require('./print-reports')({app,one,all,auth});
-require('./ai')({app,db,q,one,all,auth,role,flush:flushGoogleSheetsWrites});
+require('./ai')({app,db,q,one,all,auth,role,flush:flushGoogleSheetsWrites,storeKnowledgeFile,readKnowledgeFile,knowledgeStorageInfo});
 require('./adaptive')({app,db,q,one,all,auth,role});
 require('./intelligence')({app,db,q,one,all,auth});
 
@@ -746,7 +809,7 @@ app.use("/api", (req,res)=>res.status(404).json({error:"المسار غير مو
 app.get("*", (req,res)=>res.sendFile(path.join(__dirname,"public","index.html")));
 initializeGoogleSheetsStore().then(() => {
   const server = app.listen(PORT, "0.0.0.0", () => console.log(`Central Training Administration listening on port ${PORT} (Google Sheets primary database)`));
-  server.requestTimeout = 120000;
+  server.requestTimeout = 420000;
 }).catch(err => {
   console.error("Fatal: Google Sheets database initialization failed:", err.message);
   process.exit(1);
