@@ -7,7 +7,7 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const db = require("./db");
-const { initializeGoogleSheetsStore, scheduleGoogleSheetsSync, flushGoogleSheetsWrites, setStorageEncryption, getStorageEncryptionStatus } = require("./scripts/live-google-sheets-sync");
+const { initializeGoogleSheetsStore, scheduleGoogleSheetsSync, flushGoogleSheetsWrites, setStorageEncryption, getStorageEncryptionStatus, getGoogleSheetsStatus } = require("./scripts/live-google-sheets-sync");
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -21,7 +21,7 @@ if (production && SESSION_SECRET.length < 32) {
 app.disable("x-powered-by");
 if (production) app.set("trust proxy", 1);
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(express.json({ limit: "12mb" }));
+app.use(express.json({ limit: "75mb" }));
 app.use(express.urlencoded({ extended: false }));
 app.use(session({
   name: "british.sid",
@@ -214,7 +214,7 @@ app.post("/api/public/applications", async (req, res) => {
     const match = String(req.body.attachment_data).match(/^data:([\w.+/-]+);base64,([A-Za-z0-9+/=]+)$/);
     if (!match) return res.status(400).json({ error: "صيغة الملف المرفق غير صحيحة." });
     const bytes = Buffer.from(match[2], "base64");
-    if (bytes.length > 8 * 1024 * 1024) return res.status(413).json({ error: "الحد الأقصى لحجم المرفق 8 ميجابايت." });
+    if (bytes.length > 50 * 1024 * 1024) return res.status(413).json({ error: "الحد الأقصى لحجم المرفق 50 ميجابايت." });
     attachmentName = clean(req.body.attachment_name).slice(0,180);
     attachmentMime = match[1].slice(0,100);
     try {
@@ -334,6 +334,7 @@ app.patch("/api/applications/:id", auth, role("admin"), async (req, res) => {
 });
 
 app.get("/api/health", (req, res) => res.json({ ok: true }));
+app.get("/api/admin/google-sheets-status", auth, role("admin"), (req, res) => { res.set("Cache-Control", "no-store"); res.json(getGoogleSheetsStatus()); });
 app.get("/api/setup-status", (req, res) => {
   res.set("Cache-Control", "no-store");
   res.json({ needsSetup: one("SELECT COUNT(*) AS n FROM users").n === 0, setupKeyRequired: production });
@@ -395,10 +396,11 @@ app.get("/api/dashboard", auth, (req, res) => {
       FROM courses c JOIN enrollments en ON en.course_id=c.id
       LEFT JOIN trainers t ON c.trainer_id=t.id
       WHERE en.trainee_id=? ORDER BY c.created_at DESC`, trainee.id) : [];
-    sessions = trainee ? all(`SELECT s.*, c.title AS course_title
+    sessions = trainee ? all(`SELECT s.id,s.title,s.course_id,s.starts_at,s.duration,s.platform,s.url,s.created_at,s.description,s.session_number,s.difficulty_level,s.learning_goal,c.title AS course_title
       FROM sessions s JOIN courses c ON c.id=s.course_id
       JOIN enrollments en ON en.course_id=c.id
-      WHERE en.trainee_id=? ORDER BY s.starts_at`, trainee.id) : [];
+      WHERE en.trainee_id=? AND (COALESCE(s.workflow_source,'')<>'book' OR EXISTS(SELECT 1 FROM training_activities a WHERE a.session_id=s.id AND a.workflow_source='book' AND a.workflow_state='approved'))
+      ORDER BY s.starts_at`, trainee.id) : [];
   } else {
     courses = all(`SELECT c.*, t.name AS trainer_name, (SELECT COUNT(*) FROM enrollments e WHERE e.course_id=c.id) AS trainee_count
       FROM courses c LEFT JOIN trainers t ON c.trainer_id=t.id ORDER BY c.created_at DESC`);
@@ -572,7 +574,7 @@ app.get("/api/sessions", auth, (req, res) => {
   if (u.role === "trainer") {
     const t=one("SELECT id FROM trainers WHERE user_id=?",u.id); return res.json(t?all("SELECT s.*,c.title course_title FROM sessions s JOIN courses c ON c.id=s.course_id WHERE c.trainer_id=? ORDER BY s.starts_at",t.id):[]);
   }
-  const t=one("SELECT id FROM trainees WHERE user_id=?",u.id); return res.json(t?all("SELECT s.*,c.title course_title FROM sessions s JOIN courses c ON c.id=s.course_id JOIN enrollments e ON e.course_id=c.id WHERE e.trainee_id=? ORDER BY s.starts_at",t.id):[]);
+  const t=one("SELECT id FROM trainees WHERE user_id=?",u.id); return res.json(t?all("SELECT s.id,s.title,s.course_id,s.starts_at,s.duration,s.platform,s.url,s.created_at,s.description,s.session_number,s.difficulty_level,s.learning_goal,c.title course_title FROM sessions s JOIN courses c ON c.id=s.course_id JOIN enrollments e ON e.course_id=c.id WHERE e.trainee_id=? AND (COALESCE(s.workflow_source,'')<>'book' OR EXISTS(SELECT 1 FROM training_activities a WHERE a.session_id=s.id AND a.workflow_source='book' AND a.workflow_state='approved')) ORDER BY s.starts_at",t.id):[]);
 });
 app.post("/api/sessions", auth, role("admin","trainer"), (req, res) => {
   const err = required(req.body, ["title","course_id","starts_at","platform"]);
@@ -593,6 +595,14 @@ app.get("/api/courses/:id/enrolled", auth, role("admin","trainer"), (req,res)=>{
     if(!t||!one("SELECT id FROM courses WHERE id=? AND trainer_id=?",courseId,t.id))return res.status(403).json({error:"هذه الدورة ليست ضمن دوراتك."});
   }
   res.json(all("SELECT tr.id,tr.name,tr.phone FROM trainees tr JOIN enrollments e ON e.trainee_id=tr.id WHERE e.course_id=? ORDER BY tr.name",courseId));
+});
+app.delete("/api/courses/:id/enrolled/:traineeId", auth, role("admin"), (req,res)=>{
+  const courseId=Number(req.params.id), traineeId=Number(req.params.traineeId);
+  if(!Number.isInteger(courseId)||courseId<1||!Number.isInteger(traineeId)||traineeId<1) return res.status(400).json({error:"رقم الدورة أو المتدرب غير صحيح."});
+  const enrollment=one("SELECT id FROM enrollments WHERE course_id=? AND trainee_id=?",courseId,traineeId);
+  if(!enrollment) return res.status(404).json({error:"المتدرب غير مسجل في هذه الدورة."});
+  q("DELETE FROM enrollments WHERE course_id=? AND trainee_id=?",courseId,traineeId);
+  res.json({ok:true,message:"تم إلغاء تسجيل المتدرب من هذه الدورة فقط."});
 });
 require('./activity-workflow')({app,db,q,one,all,auth,role,uploadApplicationAttachment});
 app.get("/api/activities/:kind", auth, (req,res)=>{
@@ -696,7 +706,7 @@ app.post("/api/batches", auth, role("admin"), (req,res)=>{
 });
 app.delete("/api/batches/:id", auth, role("admin"), (req,res)=>{q("DELETE FROM training_batches WHERE id=?",Number(req.params.id));res.json({ok:true});});
 
-// Library resources: file bytes are stored on disk, metadata in SQLite. Uploads are limited to 8 MiB.
+// Library resources: file bytes are stored on disk, metadata in SQLite. Uploads are limited to 50 MiB.
 const uploadDir=path.join(process.env.DATA_DIR?path.resolve(process.env.DATA_DIR):__dirname+"/data","uploads");
 if(!fs.existsSync(uploadDir))fs.mkdirSync(uploadDir,{recursive:true});
 app.get("/api/library",auth,(req,res)=>{
@@ -711,7 +721,7 @@ app.post("/api/library",auth,role("admin","trainer"),async(req,res)=>{
  if(courseId&&!one("SELECT id FROM courses WHERE id=?",courseId))return res.status(400).json({error:"الدورة المحددة غير موجودة."});
  if(req.session.user.role==="trainer"){if(!courseId)return res.status(400).json({error:"يجب ربط المرجع بإحدى دوراتك."});const t=one("SELECT id FROM trainers WHERE user_id=?",req.session.user.id);if(!t||!one("SELECT id FROM courses WHERE id=? AND trainer_id=?",courseId,t.id))return res.status(403).json({error:"يمكنك إضافة مراجع لدوراتك فقط."});}
  const match=String(req.body.data_url).match(/^data:([\w.+-]+\/[\w.+-]+);base64,([A-Za-z0-9+/=]+)$/);if(!match)return res.status(400).json({error:"صيغة الملف غير صحيحة."});
- const bytes=Buffer.from(match[2],"base64");if(bytes.length>8*1024*1024)return res.status(413).json({error:"الحد الأقصى لحجم الملف 8 ميجابايت."});
+ const bytes=Buffer.from(match[2],"base64");if(bytes.length>50*1024*1024)return res.status(413).json({error:"الحد الأقصى لحجم الملف 50 ميجابايت."});
  const ext=path.extname(String(req.body.original_name)).slice(0,12).replace(/[^.\w-]/g,"");const stored=`${Date.now()}-${require("crypto").randomBytes(8).toString("hex")}${ext}`;
  try{let storage=stored;if(googleBridge.configured()||production){const uploaded=await uploadApplicationAttachment(req.body.original_name,match[1],match[2]);storage='drive:'+uploaded.id}else{fs.writeFileSync(path.join(uploadDir,stored),bytes,{flag:"wx"});}const r=q("INSERT INTO library_resources(title,kind,course_id,description,original_name,stored_name,mime_type,size_bytes,uploaded_by) VALUES(?,?,?,?,?,?,?,?,?)",clean(req.body.title),clean(req.body.kind)||"مرجع",courseId,clean(req.body.description),path.basename(clean(req.body.original_name)),storage,match[1],bytes.length,req.session.user.id);res.status(201).json({id:r.lastInsertRowid,ok:true});}catch(e){handleError(res,e);}
 });
