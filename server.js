@@ -808,10 +808,11 @@ app.post('/api/library/upload',auth,role('admin','trainer'),async(req,res)=>{
   // Use the Apps Script bridge only for small files when no service-account credentials exist.
   const driveCredentials=libraryDriveCredentials();
   if(googleBridge.configured()){
-   // Match British: small files use the legacy bridge; larger files are sent to Drive in 8 MiB chunks.
-   const uploaded=received<=LIBRARY_BRIDGE_SAFE_LIMIT
-    ? await googleBridge.upload(originalName,mimeType,fs.readFileSync(tempFile).toString('base64'))
-    : await googleBridge.uploadFile(tempFile,originalName,mimeType,received);
+   // Always use the resumable Drive session for library files (including small MP4s).
+   // The legacy platformUpload endpoint rejects video extensions such as MP4.
+   // uploadFile transfers data in 8 MiB chunks and supports all extensions
+   // accepted by platformCreateUploadSession in PlatformBridge.gs.
+   const uploaded=await googleBridge.uploadFile(tempFile,originalName,mimeType,received);
    storage='drive:'+uploaded.id;
   }else if(driveCredentials){
    const driveId=await uploadLibraryFileToDrive(tempFile,{original_name:originalName,mime_type:mimeType});
