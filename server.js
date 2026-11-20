@@ -21,7 +21,7 @@ if (production && SESSION_SECRET.length < 32) {
 app.disable("x-powered-by");
 if (production) app.set("trust proxy", 1);
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(express.json({ limit: "75mb" }));
+app.use(express.json({ limit: "150mb" }));
 app.use(express.urlencoded({ extended: false }));
 app.use(session({
   name: "british.sid",
@@ -707,93 +707,216 @@ app.post("/api/batches", auth, role("admin"), (req,res)=>{
 });
 app.delete("/api/batches/:id", auth, role("admin"), (req,res)=>{q("DELETE FROM training_batches WHERE id=?",Number(req.params.id));res.json({ok:true});});
 
-// Library resources: file bytes are stored on disk, metadata in SQLite. Uploads are limited to 50 MiB.
+// Library resources: files are stored locally or in the configured Google Drive store.
 const uploadDir=path.join(process.env.DATA_DIR?path.resolve(process.env.DATA_DIR):__dirname+"/data","uploads");
 if(!fs.existsSync(uploadDir))fs.mkdirSync(uploadDir,{recursive:true});
-// Knowledge originals stay private in Google Drive when a service account or the signed Apps Script bridge is configured.
-// The service-account path supports 50 MiB files; the legacy Apps Script bridge is limited to 8 MiB.
-function knowledgeServiceAccount(){
-  const raw=String(process.env.GOOGLE_SERVICE_ACCOUNT_JSON||'').trim();
-  if(raw){const credentials=JSON.parse(raw);if(!credentials.client_email||!credentials.private_key)throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON must contain client_email and private_key.');credentials.private_key=String(credentials.private_key).replace(/\\n/g,'\n');return {credentials};}
-  const encoded=String(process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64||'').trim();
-  if(encoded){const credentials=JSON.parse(Buffer.from(encoded,'base64').toString('utf8'));if(!credentials.client_email||!credentials.private_key)throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 is invalid.');credentials.private_key=String(credentials.private_key).replace(/\\n/g,'\n');return {credentials};}
-  const keyFile=process.env.GOOGLE_SERVICE_ACCOUNT_FILE||(production?'/etc/secrets/google-service-account.json':'');
-  if(keyFile&&fs.existsSync(keyFile))return {keyFile};
-  return null;
+const LIBRARY_FILE_LIMIT=50*1024*1024, LIBRARY_VIDEO_LIMIT=100*1024*1024;
+const LIBRARY_BRIDGE_SAFE_LIMIT=8*1024*1024; // Apps Script bridge payload is capped at 12 MB.
+function libraryDriveCredentials(){
+ const raw=String(process.env.GOOGLE_SERVICE_ACCOUNT_JSON||'').trim();
+ if(raw){try{return {credentials:JSON.parse(raw)}}catch(e){throw new Error('قيمة GOOGLE_SERVICE_ACCOUNT_JSON غير صالحة.')}}
+ const encoded=String(process.env.GOOGLE_SERVICE_ACCOUNT_JSON_BASE64||'').trim();
+ if(encoded){try{return {credentials:JSON.parse(Buffer.from(encoded,'base64').toString('utf8'))}}catch(e){throw new Error('قيمة GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 غير صالحة.')}}
+ const keyFile=process.env.GOOGLE_SERVICE_ACCOUNT_FILE||(production?'/etc/secrets/google-service-account.json':'');
+ if(keyFile&&fs.existsSync(keyFile))return {keyFile};
+ return null;
 }
-function knowledgeStorageInfo(){
-  // In production, Knowledge originals must use their dedicated Apps Script bridge.
-  // Never fall back to the archive bridge or the archive service-account folder.
-  const hasKnowledgeBridgeConfig=Boolean(process.env.KNOWLEDGE_SCRIPT_URL||process.env.KNOWLEDGE_BRIDGE_SECRET);
-  if(knowledgeBridge.configured())return {configured:true,mode:'google-drive-knowledge-apps-script',maxFileMb:8};
-  if(hasKnowledgeBridgeConfig)return {configured:false,mode:'incomplete-knowledge-bridge',maxFileMb:0,error:'أكمل KNOWLEDGE_SCRIPT_URL وKNOWLEDGE_BRIDGE_SECRET معًا.'};
-  if(production)return {configured:false,mode:'knowledge-bridge-required',maxFileMb:0,error:'يلزم إعداد جسر Google Apps Script المخصص لمكتبة المعرفة.'};
-  try{if(knowledgeServiceAccount())return {configured:true,mode:'google-drive-service-account',maxFileMb:50};}catch(error){return {configured:false,mode:'invalid-service-account',maxFileMb:0,error:error.message};}
-  return {configured:true,mode:'local-development',maxFileMb:50};
+async function libraryDriveClient(){
+ const credentials=libraryDriveCredentials();
+ if(!credentials)throw new Error('رفع الملفات الكبيرة يحتاج إعداد حساب خدمة Google Drive. أضف GOOGLE_SERVICE_ACCOUNT_JSON أو GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 أو GOOGLE_SERVICE_ACCOUNT_FILE، وشارك مجلد الرفع مع بريد حساب الخدمة بصلاحية محرر.');
+ const {google}=require('googleapis');
+ const auth=new google.auth.GoogleAuth({...credentials,scopes:['https://www.googleapis.com/auth/drive']});
+ return google.drive({version:'v3',auth});
 }
-async function knowledgeDriveClient(){
-  const credentials=knowledgeServiceAccount();if(!credentials)return null;
-  const {google}=require('googleapis');
-  const authOptions={scopes:['https://www.googleapis.com/auth/drive.file'],...credentials};
-  const auth=new google.auth.GoogleAuth(authOptions);
-  return google.drive({version:'v3',auth});
+async function uploadLibraryFileToDrive(filePath,meta){
+ const drive=await libraryDriveClient();
+ const result=await drive.files.create({
+  requestBody:{name:`${Date.now()}_${String(meta.original_name||'file').replace(/[\\/:*?"<>|]/g,'_').slice(0,180)}`,mimeType:meta.mime_type,parents:[process.env.GOOGLE_DRIVE_UPLOAD_FOLDER_ID||'13xUHOP92OyWO0KIJvxu1jFE2ijFbg7_u']},
+  media:{mimeType:meta.mime_type,body:fs.createReadStream(filePath)},
+  fields:'id,name,webViewLink',supportsAllDrives:true
+ });
+ return result.data.id;
 }
-async function storeKnowledgeFile({name,mimeType,base64}){
-  const info=knowledgeStorageInfo();if(!info.configured)throw new Error('Google Drive storage is not configured.');
-  const bytes=Buffer.from(base64,'base64');
-  if(bytes.length>info.maxFileMb*1024*1024)throw new Error(`Current Google Drive connection supports files up to ${info.maxFileMb} MB.`);
-  if(info.mode==='google-drive-service-account'){
-    const drive=await knowledgeDriveClient();
-    const safeName=String(name||'document').replace(/[\\/:*?"<>|]/g,'_').slice(0,180);
-    const uploaded=await drive.files.create({requestBody:{name:`knowledge_${Date.now()}_${safeName}`,mimeType:mimeType||'application/octet-stream',parents:[process.env.GOOGLE_DRIVE_UPLOAD_FOLDER_ID||DRIVE_FOLDER_ID]},media:{mimeType:mimeType||'application/octet-stream',body:require('stream').Readable.from(bytes)},fields:'id,name'});
-    return `drive-sa:${uploaded.data.id}`;
-  }
-  if(info.mode==='google-drive-knowledge-apps-script'){
-    const uploaded=await knowledgeBridge.upload(name,mimeType,base64);
-    return `knowledge-drive:${uploaded.id}`;
-  }
-  const ext=path.extname(String(name||'')).slice(0,12).replace(/[^.\w-]/g,'');
-  const stored=`knowledge-${Date.now()}-${crypto.randomBytes(10).toString('hex')}${ext}`;
-  const target=path.join(uploadDir,stored);
-  fs.writeFileSync(target,bytes,{flag:'wx'});
-  return stored;
+async function streamLibraryDriveFile(fileId,req,res,mimeType,downloadName){
+ const drive=await libraryDriveClient();
+ const options={responseType:'stream'};
+ if(req.headers.range)options.headers={Range:req.headers.range};
+ const response=await drive.files.get({fileId,alt:'media'},options);
+ const headers=response.headers||{};
+ res.setHeader('Content-Type',mimeType||headers['content-type']||'application/octet-stream');
+ res.setHeader('Accept-Ranges','bytes');
+ if(headers['content-range']){res.status(206);res.setHeader('Content-Range',headers['content-range']);}
+ if(headers['content-length'])res.setHeader('Content-Length',headers['content-length']);
+ if(downloadName)res.setHeader('Content-Disposition',`attachment; filename*=UTF-8''${encodeURIComponent(downloadName)}`);
+ response.data.on('error',err=>{console.error('Google Drive library stream failed:',err.message);if(!res.headersSent)res.status(502).json({error:'تعذر قراءة الملف من Google Drive.'});else res.destroy(err)});
+ response.data.pipe(res);
 }
-async function readKnowledgeFile(storedName,originalName){
-  const stored=String(storedName||'');
-  if(stored.startsWith('drive-sa:')){
-    const drive=await knowledgeDriveClient();if(!drive)throw new Error('Google service-account credentials are not configured.');
-    const file=await drive.files.get({fileId:stored.slice(8),alt:'media'},{responseType:'arraybuffer'});
-    return {bytes:Buffer.isBuffer(file.data)?file.data:Buffer.from(file.data),name:originalName||'knowledge-document'};
-  }
-  if(stored.startsWith('knowledge-drive:')){const file=await knowledgeBridge.download(stored.slice('knowledge-drive:'.length));return {bytes:file.bytes,mimeType:file.mime,name:originalName||file.name};}
-  // Legacy knowledge files uploaded through the former shared bridge remain readable.
-  if(stored.startsWith('drive:')){const file=await googleBridge.download(stored.slice(6));return {bytes:file.bytes,mimeType:file.mime,name:originalName||file.name};}
-  const safe=path.basename(stored);if(!safe||safe!==stored)throw new Error('Invalid stored file path.');
-  const target=path.resolve(uploadDir,safe);if(!target.startsWith(path.resolve(uploadDir)+path.sep))throw new Error('Invalid stored file path.');
-  return {bytes:fs.readFileSync(target),name:originalName||safe};
+function libraryResourceAccess(req,r){
+ if(!r)return false;const u=req.session.user;
+ if(u.role==='admin')return true;
+ if(u.role==='trainer'){if(!r.course_id)return true;const t=one('SELECT id FROM trainers WHERE user_id=?',u.id);return !!(t&&one('SELECT id FROM courses WHERE id=? AND trainer_id=?',r.course_id,t.id));}
+ if(!r.course_id)return true;const t=one('SELECT id FROM trainees WHERE user_id=?',u.id);return !!(t&&one('SELECT id FROM enrollments WHERE course_id=? AND trainee_id=?',r.course_id,t.id));
 }
 app.get("/api/library",auth,(req,res)=>{
  const u=req.session.user;
- if(u.role==="admin") return res.json(all(`SELECT r.id,r.title,r.kind,r.course_id,r.description,r.original_name,r.mime_type,r.size_bytes,r.created_at,c.title course_title FROM library_resources r LEFT JOIN courses c ON c.id=r.course_id ORDER BY r.created_at DESC`));
- if(u.role==="trainer") {const t=one("SELECT id FROM trainers WHERE user_id=?",u.id);return res.json(t?all(`SELECT r.id,r.title,r.kind,r.course_id,r.description,r.original_name,r.mime_type,r.size_bytes,r.created_at,c.title course_title FROM library_resources r LEFT JOIN courses c ON c.id=r.course_id WHERE r.course_id IS NULL OR c.trainer_id=? ORDER BY r.created_at DESC`,t.id):[]);}
- const t=one("SELECT id FROM trainees WHERE user_id=?",u.id);return res.json(t?all(`SELECT DISTINCT r.id,r.title,r.kind,r.course_id,r.description,r.original_name,r.mime_type,r.size_bytes,r.created_at,c.title course_title FROM library_resources r LEFT JOIN courses c ON c.id=r.course_id WHERE r.course_id IS NULL OR EXISTS(SELECT 1 FROM enrollments e WHERE e.course_id=r.course_id AND e.trainee_id=?) ORDER BY r.created_at DESC`,t.id):[]);
+ const fields=`r.id,r.title,r.kind,r.course_id,r.description,r.original_name,r.mime_type,r.size_bytes,r.created_at,c.title course_title,(SELECT COUNT(*) FROM library_reactions lr WHERE lr.resource_id=r.id) reaction_count,(SELECT COUNT(*) FROM library_comments lc WHERE lc.resource_id=r.id) comment_count`;
+ if(u.role==="admin") return res.json(all(`SELECT ${fields} FROM library_resources r LEFT JOIN courses c ON c.id=r.course_id ORDER BY r.created_at DESC`));
+ if(u.role==="trainer") {const t=one("SELECT id FROM trainers WHERE user_id=?",u.id);return res.json(t?all(`SELECT ${fields} FROM library_resources r LEFT JOIN courses c ON c.id=r.course_id WHERE r.course_id IS NULL OR c.trainer_id=? ORDER BY r.created_at DESC`,t.id):[]);}
+ const t=one("SELECT id FROM trainees WHERE user_id=?",u.id);return res.json(t?all(`SELECT DISTINCT ${fields} FROM library_resources r LEFT JOIN courses c ON c.id=r.course_id WHERE r.course_id IS NULL OR EXISTS(SELECT 1 FROM enrollments e WHERE e.course_id=r.course_id AND e.trainee_id=?) ORDER BY r.created_at DESC`,t.id):[]);
 });
+// Binary streaming endpoint: avoids Base64 expansion and exposes real browser upload progress.
+app.post('/api/library/upload',auth,role('admin','trainer'),async(req,res)=>{
+ let tempFile='';
+ try{
+  let meta;
+  try{meta=JSON.parse(decodeURIComponent(String(req.headers['x-library-metadata']||'')))}catch{return res.status(400).json({error:'بيانات المادة غير مكتملة أو غير صالحة.'});}
+  const title=clean(meta.title),kind=clean(meta.kind),isVideo=kind==='فيديو';
+  const originalName=path.basename(clean(meta.original_name));
+  const mimeType=clean(meta.mime_type)||'application/octet-stream';
+  if(!title||!originalName)return res.status(400).json({error:'أدخل عنوان المادة واختر ملفًا.'});
+  const courseId=meta.course_id?Number(meta.course_id):null;
+  if(courseId&&!one('SELECT id FROM courses WHERE id=?',courseId))return res.status(400).json({error:'الدورة المحددة غير موجودة.'});
+  if(req.session.user.role==='trainer'){
+   if(!courseId)return res.status(400).json({error:'يجب ربط المادة بإحدى دوراتك.'});
+   const t=one('SELECT id FROM trainers WHERE user_id=?',req.session.user.id);
+   if(!t||!one('SELECT id FROM courses WHERE id=? AND trainer_id=?',courseId,t.id))return res.status(403).json({error:'يمكنك إضافة مواد لدوراتك فقط.'});
+  }
+  const ext=path.extname(originalName).toLowerCase();
+  const videoExts=new Set(['.mp4','.webm','.mov','.m4v']);
+  if(isVideo&&!videoExts.has(ext))return res.status(400).json({error:'صيغة الفيديو غير مدعومة. استخدم MP4 أو WEBM أو MOV أو M4V.'});
+  if(isVideo&&!/^video\//i.test(mimeType)&&mimeType!=='application/octet-stream')return res.status(400).json({error:'نوع ملف الفيديو غير صالح.'});
+  const limit=isVideo?LIBRARY_VIDEO_LIMIT:LIBRARY_FILE_LIMIT;
+  const declared=Number(req.headers['content-length']||0);
+  if(declared>limit)return res.status(413).json({error:`الحد الأقصى ${isVideo?100:50} ميجابايت.`});
+  const stored=`${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`;
+  tempFile=path.join(uploadDir,`${stored}.uploading`);
+  let received=0;
+  await new Promise((resolve,reject)=>{
+   const output=fs.createWriteStream(tempFile,{flags:'wx'});let settled=false;
+   const fail=err=>{if(settled)return;settled=true;output.destroy();req.resume();reject(err)};
+   req.on('data',chunk=>{if(settled)return;received+=chunk.length;if(received>limit){const err=new Error(`الحد الأقصى ${isVideo?100:50} ميجابايت.`);err.status=413;return fail(err)}if(!output.write(chunk))req.pause()});
+   output.on('drain',()=>req.resume());
+   req.on('end',()=>{if(!settled)output.end()});
+   req.on('aborted',()=>fail(new Error('انقطع الاتصال قبل اكتمال رفع الملف.')));
+   req.on('error',fail);output.on('error',fail);
+   output.on('finish',()=>{if(!settled){settled=true;resolve()}});
+  });
+  if(!received)throw Object.assign(new Error('الملف المرسل فارغ.'),{status:400});
+  let storage=stored,localFile=path.join(uploadDir,stored);
+  // Large videos must use Drive API streaming/resumable upload. Sending a 50-100 MB
+  // base64 payload through Apps Script exceeds its request limits and commonly returns 502.
+  // Use the Apps Script bridge only for small files when no service-account credentials exist.
+  const driveCredentials=libraryDriveCredentials();
+  if(googleBridge.configured()){
+   // Match British: small files use the legacy bridge; larger files are sent to Drive in 8 MiB chunks.
+   const uploaded=received<=LIBRARY_BRIDGE_SAFE_LIMIT
+    ? await googleBridge.upload(originalName,mimeType,fs.readFileSync(tempFile).toString('base64'))
+    : await googleBridge.uploadFile(tempFile,originalName,mimeType,received);
+   storage='drive:'+uploaded.id;
+  }else if(driveCredentials){
+   const driveId=await uploadLibraryFileToDrive(tempFile,{original_name:originalName,mime_type:mimeType});
+   storage='drive:'+driveId;
+  }else if(production){
+   throw new Error('رفع الفيديوهات الكبيرة يحتاج إعداد حساب خدمة Google Drive: أضف GOOGLE_SERVICE_ACCOUNT_JSON أو GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 في Render، وشارك مجلد الرفع مع بريد حساب الخدمة بصلاحية محرر.');
+  }else{
+   fs.renameSync(tempFile,localFile);tempFile='';
+  }
+  if(storage.startsWith('drive:')&&tempFile){fs.rmSync(tempFile,{force:true});tempFile='';}
+  const r=q('INSERT INTO library_resources(title,kind,course_id,description,original_name,stored_name,mime_type,size_bytes,uploaded_by) VALUES(?,?,?,?,?,?,?,?,?)',title,isVideo?'فيديو':kind||'مرجع',courseId,clean(meta.description),originalName,storage,mimeType,received,req.session.user.id);
+  if(isVideo&&Array.isArray(meta.questions))for(const item of meta.questions){
+   const opts=Array.isArray(item.options)?item.options.map(clean).filter(Boolean).slice(0,6):[];
+   if(clean(item.question)&&opts.length>=2)q('INSERT INTO library_video_questions(resource_id,at_seconds,question,options_json,correct_index,points) VALUES(?,?,?,?,?,?)',r.lastInsertRowid,Math.max(0,Number(item.at_seconds)||0),clean(item.question),JSON.stringify(opts),Math.max(0,Math.min(opts.length-1,Number(item.correct_index)||0)),Math.max(0.25,Math.min(100,Number(item.points)||1)));
+  }
+  res.status(201).json({id:r.lastInsertRowid,ok:true});
+ }catch(e){
+  if(tempFile)try{fs.rmSync(tempFile,{force:true})}catch{}
+  console.error('Library binary upload failed:',e.stack||e.message);
+  if(!res.headersSent)res.status(e.status||500).json({error:e.status===413?e.message:(e.message||'تعذر حفظ الملف. راجع إعدادات التخزين وسجل الخادم.')});
+ }
+});
+
 app.post("/api/library",auth,role("admin","trainer"),async(req,res)=>{
+ const isVideo=clean(req.body.kind)==='فيديو';
  const err=required(req.body,["title","original_name","data_url"]);if(err)return res.status(400).json({error:err});
  const courseId=req.body.course_id?Number(req.body.course_id):null;
  if(courseId&&!one("SELECT id FROM courses WHERE id=?",courseId))return res.status(400).json({error:"الدورة المحددة غير موجودة."});
- if(req.session.user.role==="trainer"){if(!courseId)return res.status(400).json({error:"يجب ربط المرجع بإحدى دوراتك."});const t=one("SELECT id FROM trainers WHERE user_id=?",req.session.user.id);if(!t||!one("SELECT id FROM courses WHERE id=? AND trainer_id=?",courseId,t.id))return res.status(403).json({error:"يمكنك إضافة مراجع لدوراتك فقط."});}
+ if(req.session.user.role==="trainer"){if(!courseId)return res.status(400).json({error:"يجب ربط المادة بإحدى دوراتك."});const t=one("SELECT id FROM trainers WHERE user_id=?",req.session.user.id);if(!t||!one("SELECT id FROM courses WHERE id=? AND trainer_id=?",courseId,t.id))return res.status(403).json({error:"يمكنك إضافة مواد لدوراتك فقط."});}
  const match=String(req.body.data_url).match(/^data:([\w.+-]+\/[\w.+-]+);base64,([A-Za-z0-9+/=]+)$/);if(!match)return res.status(400).json({error:"صيغة الملف غير صحيحة."});
- const bytes=Buffer.from(match[2],"base64");if(bytes.length>50*1024*1024)return res.status(413).json({error:"الحد الأقصى لحجم الملف 50 ميجابايت."});
- const ext=path.extname(String(req.body.original_name)).slice(0,12).replace(/[^.\w-]/g,"");const stored=`${Date.now()}-${require("crypto").randomBytes(8).toString("hex")}${ext}`;
- try{let storage=stored;if(googleBridge.configured()||production){const uploaded=await uploadApplicationAttachment(req.body.original_name,match[1],match[2]);storage='drive:'+uploaded.id}else{fs.writeFileSync(path.join(uploadDir,stored),bytes,{flag:"wx"});}const r=q("INSERT INTO library_resources(title,kind,course_id,description,original_name,stored_name,mime_type,size_bytes,uploaded_by) VALUES(?,?,?,?,?,?,?,?,?)",clean(req.body.title),clean(req.body.kind)||"مرجع",courseId,clean(req.body.description),path.basename(clean(req.body.original_name)),storage,match[1],bytes.length,req.session.user.id);res.status(201).json({id:r.lastInsertRowid,ok:true});}catch(e){handleError(res,e);}
+ const bytes=Buffer.from(match[2],"base64"),limit=isVideo?LIBRARY_VIDEO_LIMIT:LIBRARY_FILE_LIMIT;
+ if(bytes.length>limit)return res.status(413).json({error:`الحد الأقصى ${isVideo?100:50} ميجابايت.`});
+ if(isVideo&&!/^video\//i.test(match[1]))return res.status(400).json({error:"يجب اختيار ملف فيديو صالح."});
+ const ext=path.extname(String(req.body.original_name)).slice(0,12).replace(/[^.\w-]/g,"");const stored=`${Date.now()}-${crypto.randomBytes(8).toString("hex")}${ext}`;
+ try{
+  let storage=stored;
+  if(googleBridge.configured()||production){const uploaded=await uploadApplicationAttachment(req.body.original_name,match[1],match[2]);storage='drive:'+uploaded.id}
+  else fs.writeFileSync(path.join(uploadDir,stored),bytes,{flag:"wx"});
+  const r=q("INSERT INTO library_resources(title,kind,course_id,description,original_name,stored_name,mime_type,size_bytes,uploaded_by) VALUES(?,?,?,?,?,?,?,?,?)",clean(req.body.title),isVideo?"فيديو":clean(req.body.kind)||"مرجع",courseId,clean(req.body.description),path.basename(clean(req.body.original_name)),storage,match[1],bytes.length,req.session.user.id);
+  if(isVideo&&Array.isArray(req.body.questions))for(const item of req.body.questions){const opts=Array.isArray(item.options)?item.options.map(clean).filter(Boolean).slice(0,6):[];if(clean(item.question)&&opts.length>=2){q('INSERT INTO library_video_questions(resource_id,at_seconds,question,options_json,correct_index,points) VALUES(?,?,?,?,?,?)',r.lastInsertRowid,Math.max(0,Number(item.at_seconds)||0),clean(item.question),JSON.stringify(opts),Math.max(0,Math.min(opts.length-1,Number(item.correct_index)||0)));}}
+  res.status(201).json({id:r.lastInsertRowid,ok:true});
+ }catch(e){handleError(res,e);}
 });
+app.get("/api/library/:id/watch",auth,(req,res)=>{
+ const r=one('SELECT * FROM library_resources WHERE id=?',Number(req.params.id));if(!libraryResourceAccess(req,r))return res.status(r?403:404).json({error:r?'ليس لديك صلاحية لعرض هذه المادة.':'المادة غير موجودة.'});
+ if(r.kind!=='فيديو')return res.status(400).json({error:'هذه المادة ليست فيديو.'});
+ const t=req.session.user.role==='trainee'?one('SELECT id FROM trainees WHERE user_id=?',req.session.user.id):null;
+ const progress=t?one('SELECT position_seconds,duration_seconds,watched_seconds,completed FROM library_video_progress WHERE resource_id=? AND trainee_id=?',r.id,t.id):null;
+ const questions=all('SELECT id,at_seconds,question,options_json FROM library_video_questions WHERE resource_id=? ORDER BY at_seconds,id',r.id).map(x=>({...x,options:JSON.parse(x.options_json),answered:!!(t&&one('SELECT id FROM library_video_answers WHERE question_id=? AND trainee_id=?',x.id,t.id))}));
+ const reactions=one('SELECT COUNT(*) n FROM library_reactions WHERE resource_id=?',r.id).n;
+ const comments=all('SELECT c.id,c.comment,c.created_at,u.display_name FROM library_comments c JOIN users u ON u.id=c.user_id WHERE c.resource_id=? ORDER BY c.created_at DESC LIMIT 100',r.id);
+ res.json({id:r.id,title:r.title,description:r.description,mime_type:r.mime_type,size_bytes:r.size_bytes,progress,questions,reactions,comments,liked:!!one('SELECT id FROM library_reactions WHERE resource_id=? AND user_id=?',r.id,req.session.user.id)});
+});
+app.get('/api/library/:id/stream',auth,async(req,res)=>{
+ const r=one('SELECT * FROM library_resources WHERE id=?',Number(req.params.id));if(!libraryResourceAccess(req,r))return res.status(r?403:404).json({error:'غير مسموح'});if(r.kind!=='فيديو')return res.sendStatus(404);
+ if(r.stored_name.startsWith('drive:')){try{return await streamLibraryDriveFile(r.stored_name.slice(6),req,res,r.mime_type)}catch(e){console.error('Library video Drive stream failed:',e.message);return res.status(502).json({error:'تعذر تحميل الفيديو من Google Drive. تحقق من صلاحيات حساب الخدمة ومجلد التخزين.'})}}
+ const file=path.join(uploadDir,path.basename(r.stored_name));if(!fs.existsSync(file))return res.status(404).json({error:'ملف الفيديو غير موجود.'});res.setHeader('Accept-Ranges','bytes');res.type(r.mime_type);res.sendFile(file);
+});
+app.post('/api/library/:id/progress',auth,(req,res)=>{
+ const r=one('SELECT * FROM library_resources WHERE id=?',Number(req.params.id));if(!libraryResourceAccess(req,r))return res.sendStatus(r?403:404);if(req.session.user.role!=='trainee')return res.json({ok:true});const t=one('SELECT id FROM trainees WHERE user_id=?',req.session.user.id);if(!t)return res.status(403).json({error:'حساب المتدرب غير مرتبط بملف متدرب.'});
+ const duration=Math.max(0,Number(req.body.duration_seconds)||0),position=Math.max(0,Number(req.body.position_seconds)||0),watched=Math.max(0,Math.min(duration||position,Number(req.body.watched_seconds)||0)),completed=Boolean(req.body.completed);
+ q(`INSERT INTO library_video_progress(resource_id,trainee_id,position_seconds,duration_seconds,watched_seconds,completed,last_watched_at) VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(resource_id,trainee_id) DO UPDATE SET position_seconds=excluded.position_seconds,duration_seconds=MAX(library_video_progress.duration_seconds,excluded.duration_seconds),watched_seconds=MAX(library_video_progress.watched_seconds,excluded.watched_seconds),completed=MAX(library_video_progress.completed,excluded.completed),last_watched_at=CURRENT_TIMESTAMP`,r.id,t.id,position,duration,watched,completed?1:0);res.json({ok:true});
+});
+app.post('/api/library/:id/answer',auth,role('trainee'),(req,res)=>{
+ const resource=one('SELECT * FROM library_resources WHERE id=? AND kind=\'فيديو\'',Number(req.params.id));
+ if(!libraryResourceAccess(req,resource))return res.sendStatus(resource?403:404);
+ const t=one('SELECT id FROM trainees WHERE user_id=?',req.session.user.id);
+ const question=one('SELECT q.* FROM library_video_questions q WHERE q.id=? AND q.resource_id=?',Number(req.body.question_id),Number(req.params.id));
+ if(!t||!question)return res.status(404).json({error:'السؤال غير موجود.'});
+ const opts=JSON.parse(question.options_json),selected=Number(req.body.selected_index);
+ if(!Number.isInteger(selected)||selected<0||selected>=opts.length)return res.status(400).json({error:'اختر إجابة صحيحة.'});
+ const priorCorrect=one('SELECT id FROM library_video_answers WHERE question_id=? AND trainee_id=?',question.id,t.id);
+ if(priorCorrect)return res.status(409).json({error:'سبق اجتياز هذا السؤال.'});
+ const correct=selected===question.correct_index,points=correct?Math.max(0,Number(question.points)||1):0;
+ q('INSERT INTO library_video_answer_attempts(resource_id,question_id,trainee_id,selected_index,is_correct,points_awarded) VALUES(?,?,?,?,?,?)',resource.id,question.id,t.id,selected,correct?1:0,points);
+ if(correct)q('INSERT INTO library_video_answers(question_id,trainee_id,selected_index,is_correct) VALUES(?,?,?,1)',question.id,t.id,selected);
+ const attempts=one('SELECT COUNT(*) n FROM library_video_answer_attempts WHERE question_id=? AND trainee_id=?',question.id,t.id).n;
+ const score=one('SELECT COALESCE(SUM(points_awarded),0) n FROM library_video_answer_attempts WHERE resource_id=? AND trainee_id=?',resource.id,t.id).n;
+ res.json({ok:true,correct,attempts,points_awarded:points,score,message:correct?'إجابة صحيحة! حصلت على '+points+' درجة. يمكنك متابعة الفيديو.':'إجابة غير صحيحة. حاول مرة أخرى؛ لم يتم خصم درجات.'});
+});
+
+app.post('/api/library/:id/reaction',auth,(req,res)=>{const r=one('SELECT * FROM library_resources WHERE id=?',Number(req.params.id));if(!libraryResourceAccess(req,r))return res.sendStatus(r?403:404);const old=one('SELECT id FROM library_reactions WHERE resource_id=? AND user_id=?',r.id,req.session.user.id);if(old)q('DELETE FROM library_reactions WHERE id=?',old.id);else q('INSERT INTO library_reactions(resource_id,user_id,reaction) VALUES(?,?,\'like\')',r.id,req.session.user.id);res.json({liked:!old,count:one('SELECT COUNT(*) n FROM library_reactions WHERE resource_id=?',r.id).n});});
+app.post('/api/library/:id/comments',auth,(req,res)=>{const r=one('SELECT * FROM library_resources WHERE id=?',Number(req.params.id));const comment=clean(req.body.comment);if(!libraryResourceAccess(req,r))return res.sendStatus(r?403:404);if(!comment||comment.length>1000)return res.status(400).json({error:'اكتب تعليقًا لا يتجاوز 1000 حرف.'});q('INSERT INTO library_comments(resource_id,user_id,comment) VALUES(?,?,?)',r.id,req.session.user.id,comment);res.status(201).json({ok:true});});
+app.get('/api/library/:id/analytics',auth,role('admin','trainer'),(req,res)=>{
+ const r=one('SELECT * FROM library_resources WHERE id=? AND kind=\'فيديو\'',Number(req.params.id));
+ if(!r||!libraryResourceAccess(req,r))return res.sendStatus(404);
+ const rows=all(`SELECT t.id trainee_id,t.name,COALESCE(p.position_seconds,0) position_seconds,COALESCE(p.duration_seconds,0) duration_seconds,COALESCE(p.watched_seconds,0) watched_seconds,COALESCE(p.completed,0) completed,p.last_watched_at
+ FROM trainees t LEFT JOIN library_video_progress p ON p.trainee_id=t.id AND p.resource_id=?
+ WHERE (? IS NULL OR EXISTS(SELECT 1 FROM enrollments e WHERE e.trainee_id=t.id AND e.course_id=?)) ORDER BY t.name`,r.id,r.course_id,r.course_id);
+ const questions=all(`SELECT q.id,q.at_seconds,q.question,q.points,
+  COUNT(a.id) attempts,SUM(CASE WHEN a.is_correct=1 THEN 1 ELSE 0 END) correct_attempts
+  FROM library_video_questions q LEFT JOIN library_video_answer_attempts a ON a.question_id=q.id
+  WHERE q.resource_id=? GROUP BY q.id ORDER BY q.at_seconds,q.id`,r.id);
+ const learners=rows.map(x=>({...x,answers:all(`SELECT q.id question_id,q.question,q.at_seconds,q.points,
+  COUNT(a.id) attempts,MAX(a.is_correct) passed,MAX(a.attempted_at) last_attempt,
+  SUM(a.points_awarded) points_awarded
+  FROM library_video_questions q LEFT JOIN library_video_answer_attempts a ON a.question_id=q.id AND a.trainee_id=?
+  WHERE q.resource_id=? GROUP BY q.id ORDER BY q.at_seconds,q.id`,x.trainee_id,r.id)}));
+ res.json({total:rows.length,started:rows.filter(x=>x.watched_seconds>0).length,completed:rows.filter(x=>x.completed).length,questions,learners});
+});
+
 app.get("/api/library/:id/download",auth,async(req,res)=>{
- const r=one("SELECT * FROM library_resources WHERE id=?",Number(req.params.id));if(!r)return res.status(404).json({error:"الملف غير موجود."});
- const u=req.session.user;if(u.role==="trainee"&&r.course_id){const t=one("SELECT id FROM trainees WHERE user_id=?",u.id);if(!t||!one("SELECT id FROM enrollments WHERE course_id=? AND trainee_id=?",r.course_id,t.id))return res.status(403).json({error:"ليس لديك صلاحية لفتح هذا الملف."});}
- if(u.role==="trainer"&&r.course_id){const t=one("SELECT id FROM trainers WHERE user_id=?",u.id);if(!t||!one("SELECT id FROM courses WHERE id=? AND trainer_id=?",r.course_id,t.id))return res.status(403).json({error:"ليس لديك صلاحية لفتح هذا الملف."});}
- if(r.stored_name.startsWith('drive:')){try{const file=await googleBridge.download(r.stored_name.slice(6));res.attachment(r.original_name);return res.send(file.bytes)}catch(e){return res.status(502).json({error:e.message})}}
- const file=path.join(uploadDir,r.stored_name);if(!fs.existsSync(file))return res.status(404).json({error:"ملف التخزين غير موجود على الخادم."});res.download(file,r.original_name);
+ const r=one("SELECT * FROM library_resources WHERE id=?",Number(req.params.id));if(!libraryResourceAccess(req,r))return res.status(r?403:404).json({error:"ليس لديك صلاحية لفتح هذه المادة."});
+ if(r.stored_name.startsWith('drive:')){try{return await streamLibraryDriveFile(r.stored_name.slice(6),req,res,r.mime_type,r.original_name)}catch(e){console.error('Library Drive download failed:',e.message);return res.status(502).json({error:'تعذر تنزيل الملف من Google Drive. تحقق من صلاحيات حساب الخدمة ومجلد التخزين.'})}}
+ const file=path.join(uploadDir,path.basename(r.stored_name));if(!fs.existsSync(file))return res.status(404).json({error:"ملف التخزين غير موجود على الخادم."});res.download(file,r.original_name);
 });
 app.delete("/api/library/:id",auth,role("admin"),(req,res)=>{const r=one("SELECT * FROM library_resources WHERE id=?",Number(req.params.id));if(!r)return res.status(404).json({error:"المرجع غير موجود."});try{if(!r.stored_name.startsWith('drive:')&&one('SELECT COUNT(*) n FROM library_resources WHERE stored_name=?',r.stored_name).n<=1)fs.rmSync(path.join(uploadDir,path.basename(r.stored_name)),{force:true});q("DELETE FROM library_resources WHERE id=?",r.id);res.json({ok:true});}catch(e){handleError(res,e);}});
 
@@ -801,8 +924,59 @@ require('./admin-edit')({app,db,q,one,all,auth,role});
 require('./platform-chat')({app,db,q,one,all,auth,role});
 require('./learning')({app,db,q,one,all,auth,role});
 require('./print-reports')({app,one,all,auth});
+
+// Dedicated storage adapter for the AI knowledge library.
+// Uses the same validated Google service-account settings as the existing library,
+// while keeping knowledge files in their own Apps Script bridge when configured.
+function knowledgeServiceAccount(){ return libraryDriveCredentials(); }
+function knowledgeStorageInfo(){
+  const hasBridgeConfig=Boolean(process.env.KNOWLEDGE_SCRIPT_URL||process.env.KNOWLEDGE_BRIDGE_SECRET);
+  if(knowledgeBridge.configured())return {configured:true,mode:'google-drive-knowledge-apps-script',maxFileMb:8};
+  if(hasBridgeConfig)return {configured:false,mode:'incomplete-knowledge-bridge',maxFileMb:0,error:'أكمل KNOWLEDGE_SCRIPT_URL وKNOWLEDGE_BRIDGE_SECRET معًا.'};
+  if(production)return {configured:false,mode:'knowledge-bridge-required',maxFileMb:0,error:'يلزم إعداد جسر Google Apps Script المخصص لمكتبة المعرفة.'};
+  try{if(knowledgeServiceAccount())return {configured:true,mode:'google-drive-service-account',maxFileMb:50};}
+  catch(error){return {configured:false,mode:'invalid-service-account',maxFileMb:0,error:error.message};}
+  return {configured:true,mode:'local-development',maxFileMb:50};
+}
+async function knowledgeDriveClient(){
+  const credentials=knowledgeServiceAccount();if(!credentials)throw new Error('Google service-account credentials are not configured.');
+  const {google}=require('googleapis');
+  const auth=new google.auth.GoogleAuth({...credentials,scopes:['https://www.googleapis.com/auth/drive.file']});
+  return google.drive({version:'v3',auth});
+}
+async function storeKnowledgeFile({name,mimeType,base64}){
+  const info=knowledgeStorageInfo();if(!info.configured)throw new Error(info.error||'Google Drive storage is not configured.');
+  const bytes=Buffer.from(base64,'base64');
+  if(bytes.length>info.maxFileMb*1024*1024)throw new Error(`Current knowledge storage supports files up to ${info.maxFileMb} MB.`);
+  if(info.mode==='google-drive-service-account'){
+    const drive=await knowledgeDriveClient();
+    const safeName=String(name||'document').replace(/[\\/:*?"<>|]/g,'_').slice(0,180);
+    const uploaded=await drive.files.create({requestBody:{name:`knowledge_${Date.now()}_${safeName}`,mimeType:mimeType||'application/octet-stream',parents:[process.env.GOOGLE_DRIVE_UPLOAD_FOLDER_ID||DRIVE_FOLDER_ID]},media:{mimeType:mimeType||'application/octet-stream',body:require('stream').Readable.from(bytes)},fields:'id,name'});
+    return `drive-sa:${uploaded.data.id}`;
+  }
+  if(info.mode==='google-drive-knowledge-apps-script'){
+    const uploaded=await knowledgeBridge.upload(name,mimeType,base64);return `knowledge-drive:${uploaded.id}`;
+  }
+  const ext=path.extname(String(name||'')).slice(0,12).replace(/[^.\w-]/g,'');
+  const stored=`knowledge-${Date.now()}-${crypto.randomBytes(10).toString('hex')}${ext}`;
+  fs.writeFileSync(path.join(uploadDir,stored),bytes,{flag:'wx'});return stored;
+}
+async function readKnowledgeFile(storedName,originalName){
+  const stored=String(storedName||'');
+  if(stored.startsWith('drive-sa:')){
+    const drive=await knowledgeDriveClient();const file=await drive.files.get({fileId:stored.slice(8),alt:'media'},{responseType:'arraybuffer'});
+    return {bytes:Buffer.isBuffer(file.data)?file.data:Buffer.from(file.data),name:originalName||'knowledge-document'};
+  }
+  if(stored.startsWith('knowledge-drive:')){const file=await knowledgeBridge.download(stored.slice('knowledge-drive:'.length));return {bytes:file.bytes,mimeType:file.mime,name:originalName||file.name};}
+  if(stored.startsWith('drive:')){const file=await googleBridge.download(stored.slice(6));return {bytes:file.bytes,mimeType:file.mime,name:originalName||file.name};}
+  const safe=path.basename(stored);if(!safe||safe!==stored)throw new Error('Invalid stored file path.');
+  const target=path.resolve(uploadDir,safe);if(!target.startsWith(path.resolve(uploadDir)+path.sep))throw new Error('Invalid stored file path.');
+  return {bytes:fs.readFileSync(target),name:originalName||safe};
+}
+
 require('./ai')({app,db,q,one,all,auth,role,flush:flushGoogleSheetsWrites,storeKnowledgeFile,readKnowledgeFile,knowledgeStorageInfo});
 require('./adaptive')({app,db,q,one,all,auth,role});
+require('./trainee-performance-report')({app,one,all,auth,role});
 require('./intelligence')({app,db,q,one,all,auth});
 
 app.use("/api", (req,res)=>res.status(404).json({error:"المسار غير موجود."}));

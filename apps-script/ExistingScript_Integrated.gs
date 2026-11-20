@@ -2533,6 +2533,24 @@ function platformAuthorize() {
   DriveApp.getFolderById(PropertiesService.getScriptProperties().getProperty('PLATFORM_FOLDER_ID') || '13xUHOP92OyWO0KIJvxu1jFE2ijFbg7_u').getName();
   MailApp.getRemainingDailyQuota();
 }
+
+// Create a Drive resumable-upload session under the bridge owner's Drive permissions.
+function platformCreateUploadSession_(p, folder) {
+  var name=String(p.name||'file').replace(/[\\/:*?"<>|]/g,'_').slice(0,180);
+  var allowed=/\.(doc|docx|xls|xlsx|ppt|pptx|pdf|txt|png|jpe?g|gif|webp|zip|mp4|webm|mov|m4v)$/i;
+  if(!allowed.test(name))throw new Error('صيغة الملف غير مدعومة.');
+  var size=Number(p.size);if(!isFinite(size)||size<=0||size>104857600)throw new Error('الحد الأقصى لحجم الملف 100 ميجابايت.');
+  var mime=String(p.mime||'application/octet-stream');if(mime.length>150)mime='application/octet-stream';
+  var metadata={name:Date.now()+'_'+name,mimeType:mime,parents:[folder.getId()]};
+  var response=UrlFetchApp.fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,webViewLink',{
+    method:'post',contentType:'application/json; charset=UTF-8',payload:JSON.stringify(metadata),
+    headers:{Authorization:'Bearer '+ScriptApp.getOAuthToken(),'X-Upload-Content-Type':mime,'X-Upload-Content-Length':String(size)},muteHttpExceptions:true
+  });
+  var code=response.getResponseCode(),headers=response.getAllHeaders(),location=headers.Location||headers.location;
+  if(code<200||code>=300||!location)throw new Error('تعذر إنشاء جلسة رفع Google Drive (HTTP '+code+'): '+response.getContentText().slice(0,400));
+  return {success:true,uploadUrl:String(location),maxBytes:104857600};
+}
+
 function platformBridge_(e) {
   var lock;
   try {
@@ -2549,6 +2567,7 @@ function platformBridge_(e) {
     if(!p.requestId||!/^[a-zA-Z0-9_-]{1,100}$/.test(p.requestId)||Math.abs(Date.now()-Number(p.timestamp))>300000)throw new Error('Expired or invalid request.');
     var folder=DriveApp.getFolderById(props.getProperty('PLATFORM_FOLDER_ID')||'13xUHOP92OyWO0KIJvxu1jFE2ijFbg7_u');
     if(p.action==='platformHealth')return platformJson_({success:true,folder:folder.getName(),remainingMailQuota:MailApp.getRemainingDailyQuota()});
+    if(p.action==='platformCreateUploadSession')return platformJson_(platformCreateUploadSession_(p,folder));
     if(p.action==='platformDownload') {
       var f=DriveApp.getFileById(String(p.id)),parents=f.getParents(),inside=false;
       while(parents.hasNext())if(parents.next().getId()===folder.getId())inside=true;

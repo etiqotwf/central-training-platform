@@ -122,6 +122,62 @@ CREATE TABLE IF NOT EXISTS library_resources (
   uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS library_video_progress (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  resource_id INTEGER NOT NULL REFERENCES library_resources(id) ON DELETE CASCADE,
+  trainee_id INTEGER NOT NULL REFERENCES trainees(id) ON DELETE CASCADE,
+  position_seconds REAL NOT NULL DEFAULT 0,
+  duration_seconds REAL NOT NULL DEFAULT 0,
+  watched_seconds REAL NOT NULL DEFAULT 0,
+  completed INTEGER NOT NULL DEFAULT 0,
+  last_watched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(resource_id, trainee_id)
+);
+CREATE TABLE IF NOT EXISTS library_video_questions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  resource_id INTEGER NOT NULL REFERENCES library_resources(id) ON DELETE CASCADE,
+  at_seconds REAL NOT NULL,
+  question TEXT NOT NULL,
+  options_json TEXT NOT NULL,
+  correct_index INTEGER NOT NULL DEFAULT 0,
+  points REAL NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS library_video_answers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  question_id INTEGER NOT NULL REFERENCES library_video_questions(id) ON DELETE CASCADE,
+  trainee_id INTEGER NOT NULL REFERENCES trainees(id) ON DELETE CASCADE,
+  selected_index INTEGER NOT NULL,
+  is_correct INTEGER NOT NULL DEFAULT 0,
+  answered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(question_id, trainee_id)
+);
+CREATE TABLE IF NOT EXISTS library_video_answer_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  resource_id INTEGER NOT NULL REFERENCES library_resources(id) ON DELETE CASCADE,
+  question_id INTEGER NOT NULL REFERENCES library_video_questions(id) ON DELETE CASCADE,
+  trainee_id INTEGER NOT NULL REFERENCES trainees(id) ON DELETE CASCADE,
+  selected_index INTEGER NOT NULL,
+  is_correct INTEGER NOT NULL DEFAULT 0,
+  points_awarded REAL NOT NULL DEFAULT 0,
+  attempted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_video_attempts_trainee ON library_video_answer_attempts(trainee_id, attempted_at);
+CREATE TABLE IF NOT EXISTS library_reactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  resource_id INTEGER NOT NULL REFERENCES library_resources(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  reaction TEXT NOT NULL DEFAULT 'like',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(resource_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS library_comments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  resource_id INTEGER NOT NULL REFERENCES library_resources(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  comment TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS attendance (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
