@@ -717,3 +717,5 @@ body{font-weight:600;color:#203e34;line-height:1.8}h1,h2,h3,h4,strong,b{font-wei
 .upload-progress.is-complete .upload-stage.is-active i{background:#28a66a}
 @media(max-width:520px){.upload-progress-stages{gap:4px}.upload-stage{font-size:9px;flex-direction:column;gap:3px;padding:6px 2px}.upload-progress-meta{align-items:flex-start;flex-direction:column;gap:2px}}
 .upload-progress[hidden]{display:none!important}
+
+.video-playlist-label{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px;font-size:13px;color:#52665d}.video-playlist-label select{min-width:min(420px,100%);max-width:100%;padding:9px 12px;border:1px solid #cbd9d1;border-radius:10px;background:#fff;color:#183c32}

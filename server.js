@@ -757,12 +757,14 @@ function libraryResourceAccess(req,r){
  if(u.role==='trainer'){if(!r.course_id)return true;const t=one('SELECT id FROM trainers WHERE user_id=?',u.id);return !!(t&&one('SELECT id FROM courses WHERE id=? AND trainer_id=?',r.course_id,t.id));}
  if(!r.course_id)return true;const t=one('SELECT id FROM trainees WHERE user_id=?',u.id);return !!(t&&one('SELECT id FROM enrollments WHERE course_id=? AND trainee_id=?',r.course_id,t.id));
 }
+// Group additional videos under the first resource in a single library panel.
+if(!all('PRAGMA table_info(library_resources)').some(c=>c.name==='parent_resource_id'))db.exec('ALTER TABLE library_resources ADD COLUMN parent_resource_id INTEGER REFERENCES library_resources(id) ON DELETE CASCADE');
 app.get("/api/library",auth,(req,res)=>{
  const u=req.session.user;
- const fields=`r.id,r.title,r.kind,r.course_id,r.description,r.original_name,r.mime_type,r.size_bytes,r.created_at,r.reusable,c.title course_title,(SELECT COUNT(*) FROM library_reactions lr WHERE lr.resource_id=r.id) reaction_count,(SELECT COUNT(*) FROM library_comments lc WHERE lc.resource_id=r.id) comment_count`;
- if(u.role==="admin") return res.json(all(`SELECT ${fields} FROM library_resources r LEFT JOIN courses c ON c.id=r.course_id ORDER BY r.created_at DESC`));
- if(u.role==="trainer") {const t=one("SELECT id FROM trainers WHERE user_id=?",u.id);return res.json(t?all(`SELECT ${fields} FROM library_resources r LEFT JOIN courses c ON c.id=r.course_id WHERE r.course_id IS NULL OR c.trainer_id=? ORDER BY r.created_at DESC`,t.id):[]);}
- const t=one("SELECT id FROM trainees WHERE user_id=?",u.id);return res.json(t?all(`SELECT DISTINCT ${fields} FROM library_resources r LEFT JOIN courses c ON c.id=r.course_id WHERE r.course_id IS NULL OR EXISTS(SELECT 1 FROM enrollments e WHERE e.course_id=r.course_id AND e.trainee_id=?) ORDER BY r.created_at DESC`,t.id):[]);
+ const fields=`r.id,r.title,r.kind,r.course_id,r.description,r.original_name,r.mime_type,r.size_bytes,r.created_at,c.title course_title,(SELECT COUNT(*) FROM library_resources child WHERE child.parent_resource_id=r.id) video_count,(SELECT COUNT(*) FROM library_reactions lr WHERE lr.resource_id=r.id) reaction_count,(SELECT COUNT(*) FROM library_comments lc WHERE lc.resource_id=r.id) comment_count`;
+ if(u.role==="admin") return res.json(all(`SELECT ${fields} FROM library_resources r LEFT JOIN courses c ON c.id=r.course_id WHERE r.parent_resource_id IS NULL ORDER BY r.created_at DESC`));
+ if(u.role==="trainer") {const t=one("SELECT id FROM trainers WHERE user_id=?",u.id);return res.json(t?all(`SELECT ${fields} FROM library_resources r LEFT JOIN courses c ON c.id=r.course_id WHERE r.parent_resource_id IS NULL AND (r.course_id IS NULL OR c.trainer_id=?) ORDER BY r.created_at DESC`,t.id):[]);}
+ const t=one("SELECT id FROM trainees WHERE user_id=?",u.id);return res.json(t?all(`SELECT DISTINCT ${fields} FROM library_resources r LEFT JOIN courses c ON c.id=r.course_id WHERE r.parent_resource_id IS NULL AND (r.course_id IS NULL OR EXISTS(SELECT 1 FROM enrollments e WHERE e.course_id=r.course_id AND e.trainee_id=?)) ORDER BY r.created_at DESC`,t.id):[]);
 });
 // Binary streaming endpoint: avoids Base64 expansion and exposes real browser upload progress.
 app.post('/api/library/upload',auth,role('admin','trainer'),async(req,res)=>{
@@ -823,7 +825,9 @@ app.post('/api/library/upload',auth,role('admin','trainer'),async(req,res)=>{
    fs.renameSync(tempFile,localFile);tempFile='';
   }
   if(storage.startsWith('drive:')&&tempFile){fs.rmSync(tempFile,{force:true});tempFile='';}
-  const r=q('INSERT INTO library_resources(title,kind,course_id,description,original_name,stored_name,mime_type,size_bytes,uploaded_by) VALUES(?,?,?,?,?,?,?,?,?)',title,isVideo?'فيديو':kind||'مرجع',courseId,clean(meta.description),originalName,storage,mimeType,received,req.session.user.id);
+  const parentId=meta.parent_resource_id?Number(meta.parent_resource_id):null;
+  if(parentId){const parent=one("SELECT * FROM library_resources WHERE id=? AND kind='فيديو' AND parent_resource_id IS NULL",parentId);if(!isVideo||!parent||parent.course_id!==courseId)return res.status(400).json({error:'تعذر ربط الفيديو الإضافي بالبانل المحدد.'});}
+  const r=q('INSERT INTO library_resources(title,kind,course_id,description,original_name,stored_name,mime_type,size_bytes,uploaded_by,parent_resource_id) VALUES(?,?,?,?,?,?,?,?,?,?)',title,isVideo?'فيديو':kind||'مرجع',courseId,clean(meta.description),originalName,storage,mimeType,received,req.session.user.id,parentId);
   if(isVideo&&Array.isArray(meta.questions))for(const item of meta.questions){
    const opts=Array.isArray(item.options)?item.options.map(clean).filter(Boolean).slice(0,6):[];
    if(clean(item.question)&&opts.length>=2)q('INSERT INTO library_video_questions(resource_id,at_seconds,question,options_json,correct_index,points) VALUES(?,?,?,?,?,?)',r.lastInsertRowid,Math.max(0,Number(item.at_seconds)||0),clean(item.question),JSON.stringify(opts),Math.max(0,Math.min(opts.length-1,Number(item.correct_index)||0)),Math.max(0.25,Math.min(100,Number(item.points)||1)));
@@ -864,7 +868,8 @@ app.get("/api/library/:id/watch",auth,(req,res)=>{
  const questions=all('SELECT id,at_seconds,question,options_json FROM library_video_questions WHERE resource_id=? ORDER BY at_seconds,id',r.id).map(x=>({...x,options:JSON.parse(x.options_json),answered:!!(t&&one('SELECT id FROM library_video_answers WHERE question_id=? AND trainee_id=?',x.id,t.id))}));
  const reactions=one('SELECT COUNT(*) n FROM library_reactions WHERE resource_id=?',r.id).n;
  const comments=all('SELECT c.id,c.comment,c.created_at,u.display_name FROM library_comments c JOIN users u ON u.id=c.user_id WHERE c.resource_id=? ORDER BY c.created_at DESC LIMIT 100',r.id);
- res.json({id:r.id,title:r.title,description:r.description,mime_type:r.mime_type,size_bytes:r.size_bytes,progress,questions,reactions,comments,liked:!!one('SELECT id FROM library_reactions WHERE resource_id=? AND user_id=?',r.id,req.session.user.id)});
+ const rootId=r.parent_resource_id||r.id;const videos=all('SELECT id,title,original_name FROM library_resources WHERE id=? OR parent_resource_id=? ORDER BY id',rootId,rootId);
+ res.json({id:r.id,title:r.title,description:r.description,mime_type:r.mime_type,size_bytes:r.size_bytes,progress,questions,reactions,comments,liked:!!one('SELECT id FROM library_reactions WHERE resource_id=? AND user_id=?',r.id,req.session.user.id),videos});
 });
 app.get('/api/library/:id/stream',auth,async(req,res)=>{
  const r=one('SELECT * FROM library_resources WHERE id=?',Number(req.params.id));if(!libraryResourceAccess(req,r))return res.status(r?403:404).json({error:'غير مسموح'});if(r.kind!=='فيديو')return res.sendStatus(404);
@@ -919,7 +924,7 @@ app.get("/api/library/:id/download",auth,async(req,res)=>{
  if(r.stored_name.startsWith('drive:')){try{return await streamLibraryDriveFile(r.stored_name.slice(6),req,res,r.mime_type,r.original_name)}catch(e){console.error('Library Drive download failed:',e.message);return res.status(502).json({error:'تعذر تنزيل الملف من Google Drive. تحقق من صلاحيات حساب الخدمة ومجلد التخزين.'})}}
  const file=path.join(uploadDir,path.basename(r.stored_name));if(!fs.existsSync(file))return res.status(404).json({error:"ملف التخزين غير موجود على الخادم."});res.download(file,r.original_name);
 });
-app.delete("/api/library/:id",auth,role("admin"),(req,res)=>{const r=one("SELECT * FROM library_resources WHERE id=?",Number(req.params.id));if(!r)return res.status(404).json({error:"المرجع غير موجود."});try{if(!r.stored_name.startsWith('drive:')&&one('SELECT COUNT(*) n FROM library_resources WHERE stored_name=?',r.stored_name).n<=1)fs.rmSync(path.join(uploadDir,path.basename(r.stored_name)),{force:true});q("DELETE FROM library_resources WHERE id=?",r.id);res.json({ok:true});}catch(e){handleError(res,e);}});
+app.delete("/api/library/:id",auth,role("admin"),(req,res)=>{const r=one("SELECT * FROM library_resources WHERE id=?",Number(req.params.id));if(!r)return res.status(404).json({error:"المرجع غير موجود."});try{const rows=r.parent_resource_id?all('SELECT * FROM library_resources WHERE id=?',r.id):all('SELECT * FROM library_resources WHERE id=? OR parent_resource_id=?',r.id,r.id);for(const item of rows)if(!item.stored_name.startsWith('drive:')&&one('SELECT COUNT(*) n FROM library_resources WHERE stored_name=?',item.stored_name).n<=1)fs.rmSync(path.join(uploadDir,path.basename(item.stored_name)),{force:true});q("DELETE FROM library_resources WHERE id=?",r.parent_resource_id||r.id);res.json({ok:true});}catch(e){handleError(res,e);}});
 
 require('./admin-edit')({app,db,q,one,all,auth,role});
 require('./platform-chat')({app,db,q,one,all,auth,role});

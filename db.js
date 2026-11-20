@@ -188,9 +188,6 @@ CREATE TABLE IF NOT EXISTS attendance (
   UNIQUE(course_id, trainee_id, date)
 );
 `);
-// Library controls: allow reuse to be disabled independently for each resource.
-const libraryColumns = db.prepare("PRAGMA table_info(library_resources)").all().map(c => c.name);
-if (!libraryColumns.includes("reusable")) db.exec("ALTER TABLE library_resources ADD COLUMN reusable INTEGER NOT NULL DEFAULT 1");
 // Safe additive migrations for the in-memory schema and older Google Sheets headers.
 const courseColumns = db.prepare("PRAGMA table_info(courses)").all().map(c => c.name);
 for (const [name, definition] of [["test_url", "TEXT DEFAULT ''"], ["test_enabled", "INTEGER NOT NULL DEFAULT 0"], ["test_password", "TEXT DEFAULT ''"], ["evaluation_url", "TEXT DEFAULT ''"], ["evaluation_enabled", "INTEGER NOT NULL DEFAULT 0"]]) {
