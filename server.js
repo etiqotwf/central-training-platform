@@ -759,7 +759,7 @@ function libraryResourceAccess(req,r){
 }
 app.get("/api/library",auth,(req,res)=>{
  const u=req.session.user;
- const fields=`r.id,r.title,r.kind,r.course_id,r.description,r.original_name,r.mime_type,r.size_bytes,r.created_at,c.title course_title,(SELECT COUNT(*) FROM library_reactions lr WHERE lr.resource_id=r.id) reaction_count,(SELECT COUNT(*) FROM library_comments lc WHERE lc.resource_id=r.id) comment_count`;
+ const fields=`r.id,r.title,r.kind,r.course_id,r.description,r.original_name,r.mime_type,r.size_bytes,r.created_at,r.reusable,c.title course_title,(SELECT COUNT(*) FROM library_reactions lr WHERE lr.resource_id=r.id) reaction_count,(SELECT COUNT(*) FROM library_comments lc WHERE lc.resource_id=r.id) comment_count`;
  if(u.role==="admin") return res.json(all(`SELECT ${fields} FROM library_resources r LEFT JOIN courses c ON c.id=r.course_id ORDER BY r.created_at DESC`));
  if(u.role==="trainer") {const t=one("SELECT id FROM trainers WHERE user_id=?",u.id);return res.json(t?all(`SELECT ${fields} FROM library_resources r LEFT JOIN courses c ON c.id=r.course_id WHERE r.course_id IS NULL OR c.trainer_id=? ORDER BY r.created_at DESC`,t.id):[]);}
  const t=one("SELECT id FROM trainees WHERE user_id=?",u.id);return res.json(t?all(`SELECT DISTINCT ${fields} FROM library_resources r LEFT JOIN courses c ON c.id=r.course_id WHERE r.course_id IS NULL OR EXISTS(SELECT 1 FROM enrollments e WHERE e.course_id=r.course_id AND e.trainee_id=?) ORDER BY r.created_at DESC`,t.id):[]);

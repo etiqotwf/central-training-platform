@@ -1,7 +1,7 @@
 'use strict';
 module.exports=function({app,db,q,one,all,auth,role}){
  if(!all('PRAGMA table_info(courses)').some(c=>c.name==='display_number'))db.exec("ALTER TABLE courses ADD COLUMN display_number TEXT DEFAULT ''");
- const types={courses:{table:'courses',fields:['title','description','trainer_id','starts_on','ends_on','capacity','public_registration_enabled','display_number']},sessions:{table:'sessions',fields:['title','course_id','starts_at','duration','platform','url']},batches:{table:'training_batches',fields:['title','course_id','code','starts_on','ends_on','notes']},activities:{table:'training_activities',fields:['title','description','course_id','due_date','status','external_url','trainee_ids','submission_type']},library:{table:'library_resources',fields:['title','description','kind','course_id']},'training-plans':{table:'training_plans',fields:['title','description','url']},applications:{table:'course_applications',fields:['applicant_name','email','phone','course_id','admin_note']}};
+ const types={courses:{table:'courses',fields:['title','description','trainer_id','starts_on','ends_on','capacity','public_registration_enabled','display_number']},sessions:{table:'sessions',fields:['title','course_id','starts_at','duration','platform','url']},batches:{table:'training_batches',fields:['title','course_id','code','starts_on','ends_on','notes']},activities:{table:'training_activities',fields:['title','description','course_id','due_date','status','external_url','trainee_ids','submission_type']},library:{table:'library_resources',fields:['title','description','kind','course_id','reusable']},'training-plans':{table:'training_plans',fields:['title','description','url']},applications:{table:'course_applications',fields:['applicant_name','email','phone','course_id','admin_note']}};
  const reject=m=>{throw Object.assign(Error(m),{status:400})};
  function get(req){const spec=types[req.params.type];if(!spec)throw Object.assign(Error('نوع السجل غير صحيح.'),{status:404});const item=one(`SELECT * FROM ${spec.table} WHERE id=?`,Number(req.params.id));if(!item)throw Object.assign(Error('السجل غير موجود.'),{status:404});return {spec,item}}
  function fail(res,e){res.status(e.status||500).json({error:e.status?e.message:'تعذر حفظ التعديل.'})}
@@ -13,7 +13,7 @@ module.exports=function({app,db,q,one,all,auth,role}){
   for(const field of spec.fields){
    if(['course_id','trainer_id'].includes(field)){const value=merged[field];merged[field]=value===null||value===''?null:Number(value);if(merged[field]&&(!Number.isInteger(merged[field])||!one(`SELECT id FROM ${field==='course_id'?'courses':'trainers'} WHERE id=?`,merged[field])))reject('اختر دورة أو محاضراً موجوداً.');}
    else if(['capacity','duration'].includes(field)){merged[field]=Number(merged[field]);if(!Number.isInteger(merged[field])||merged[field]<(field==='duration'?1:0)||merged[field]>100000)reject('القيمة العددية غير صحيحة.');}
-   else if(field==='public_registration_enabled')merged[field]=[true,1,'1','true'].includes(merged[field])?1:0;
+   else if(['public_registration_enabled','reusable'].includes(field))merged[field]=[true,1,'1','true'].includes(merged[field])?1:0;
    else if(field!=='trainee_ids'){merged[field]=String(merged[field]??'').trim();if(merged[field].length>20000)reject('أحد الحقول يتجاوز الطول المسموح.');}
   }
   if(spec.fields.includes('title')&&!merged.title)reject('العنوان مطلوب.');
