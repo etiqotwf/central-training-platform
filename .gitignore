@@ -33,3 +33,5 @@ logs/
 migrate-facebook-storage.js
 local-worker-config.json
 local-worker/worker-old-backup.txt
+# Local secrets and machine-specific files (never commit)
+local-worker/local-worker-config.json

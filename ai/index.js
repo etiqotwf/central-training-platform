@@ -1,6 +1,6 @@
 'use strict';
 module.exports=function({app,db,q,one,all,auth,role,aiGenerate,flush=async()=>{},storeKnowledgeFile,readKnowledgeFile,knowledgeStorageInfo=()=>({configured:false,maxFileMb:0,mode:'unavailable'})}){
- const provider=require('./provider');const crypto=require('crypto'),path=require('path'),generate=aiGenerate||provider,{retrieve,chunks}=require('./knowledge');const buildRuleBasedPlan=require('./course-planner');const {chunkExtractedDocument}=require('./knowledge-workspace');const knowledgeEngine=require('./knowledge-engine');const {rankKnowledgeChunks,answerKnowledgeQuestion}=knowledgeEngine;
+ const provider=require('./provider');const crypto=require('crypto'),path=require('path'),zlib=require('zlib'),generate=aiGenerate||provider,{retrieve,chunks}=require('./knowledge');const buildRuleBasedPlan=require('./course-planner');const {chunkExtractedDocument}=require('./knowledge-workspace');const knowledgeEngine=require('./knowledge-engine');const {rankKnowledgeChunks,answerKnowledgeQuestion}=knowledgeEngine;
  db.exec(`CREATE TABLE IF NOT EXISTS ai_settings(id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL DEFAULT 0,trainees_enabled INTEGER NOT NULL DEFAULT 0,trainers_enabled INTEGER NOT NULL DEFAULT 1,daily_requests INTEGER NOT NULL DEFAULT 20,daily_tokens INTEGER NOT NULL DEFAULT 150000,max_output INTEGER NOT NULL DEFAULT 2500);
  CREATE TABLE IF NOT EXISTS ai_course_settings(course_id INTEGER PRIMARY KEY REFERENCES courses(id) ON DELETE CASCADE,enabled INTEGER NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS ai_sources(id INTEGER PRIMARY KEY AUTOINCREMENT,course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,title TEXT NOT NULL,content TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
@@ -22,6 +22,9 @@ module.exports=function({app,db,q,one,all,auth,role,aiGenerate,flush=async()=>{}
  addColumns('sessions', [['workflow_source',"TEXT NOT NULL DEFAULT ''"],['workflow_plan_id','INTEGER NOT NULL DEFAULT 0'],['session_number','INTEGER NOT NULL DEFAULT 0'],['difficulty_level',"TEXT NOT NULL DEFAULT ''"],['learning_goal',"TEXT NOT NULL DEFAULT ''"],['instructor_notes',"TEXT NOT NULL DEFAULT ''"]]);
  addColumns('training_activities', [['workflow_source',"TEXT NOT NULL DEFAULT ''"],['workflow_state',"TEXT NOT NULL DEFAULT ''"],['workflow_plan_id','INTEGER NOT NULL DEFAULT 0'],['session_id','INTEGER REFERENCES sessions(id) ON DELETE SET NULL'],['session_number','INTEGER NOT NULL DEFAULT 0'],['difficulty_level',"TEXT NOT NULL DEFAULT ''"],['learning_goal',"TEXT NOT NULL DEFAULT ''"],['rubric',"TEXT NOT NULL DEFAULT ''"],['quiz_question_count','INTEGER NOT NULL DEFAULT 0'],['approved_at',"TEXT NOT NULL DEFAULT ''"],['approved_by','INTEGER REFERENCES users(id) ON DELETE SET NULL']]);
  const fail=(message,status=400)=>{throw Object.assign(Error(message),{status})};
+ const encodeCoursePlan=plan=>{const raw=JSON.stringify(plan),packed=zlib.deflateRawSync(Buffer.from(raw,'utf8'),{level:9}).toString('base64');if(packed.length>35000)fail('الخطة أكبر من الحد الآمن للتخزين الدائم. قلل عدد الجلسات أو حجم المادة العلمية ثم أعد الإنشاء.',413);return 'zlib:v1:'+packed};
+ const decodeCoursePlan=value=>{const raw=String(value||'');if(raw.startsWith('zlib:v1:'))return zlib.inflateRawSync(Buffer.from(raw.slice(8),'base64')).toString('utf8');return raw};
+
  const wrap=fn=>async(req,res)=>{res.set('Cache-Control','private, no-store');try{await fn(req,res)}catch(e){res.status(e.status||500).json({error:e.status?e.message:'تعذر تنفيذ العملية. حاول مجدداً.'})}};
  const today=()=>new Date().toLocaleDateString('en-CA',{timeZone:'Africa/Cairo'});
  const settings=()=>one('SELECT * FROM ai_settings WHERE id=1')||{enabled:0,trainees_enabled:0,trainers_enabled:1,daily_requests:20,daily_tokens:150000,max_output:2500,execution_mode:'auto'};
@@ -202,7 +205,7 @@ module.exports=function({app,db,q,one,all,auth,role,aiGenerate,flush=async()=>{}
    return p;
  }
  app.post('/api/ai/course-plan/generate',auth,role('admin'),wrap(async(req,res)=>{const c=course(req.body.course_id,req.session.user),count=Number(req.body.sessions),hours=Number(req.body.hours),content=String(req.body.content||'').trim();if(!Number.isInteger(count)||count<1||count>20||!Number.isFinite(hours)||hours<1||hours>200||hours*60<count*15||hours*60>count*600||content.length<80||content.length>500000)fail('حدد من 1 إلى 20 جلسة وإجمالي ساعات من 1 إلى 200، وارفق مادة علمية قابلة للاستخراج حتى 500 ألف حرف.');const plan=buildRuleBasedPlan({courseTitle:c.title,count,hours,content,sourceTitle:String(req.body.source_title||'المادة العلمية'),level:String(req.body.level||'مبتدئ'),notes:String(req.body.notes||'')});res.json({plan:validateCoursePlan(plan,count,hours),source_title:String(req.body.source_title||'المادة العلمية'),generator:'progressive-rule-based',uses_ai:false})}));
- app.post('/api/ai/course-plan/apply',auth,role('admin'),wrap((req,res)=>{
+ app.post('/api/ai/course-plan/apply',auth,role('admin'),wrap(async(req,res)=>{
    const c=course(req.body.course_id,req.session.user),p=req.body.plan;
    if(!p||!Array.isArray(p.sessions)||p.sessions.length<1||p.sessions.length>20)fail('الخطة غير صالحة.');
    const plan=validateCoursePlan(p,p.sessions.length,Number(p.total_hours));
@@ -211,7 +214,7 @@ module.exports=function({app,db,q,one,all,auth,role,aiGenerate,flush=async()=>{}
    const startDate=new Date(`${start}T09:00:00`);
    let planId=0;
    db.transaction(()=>{
-     planId=q('INSERT INTO ai_course_plans(course_id,created_by,plan_json) VALUES(?,?,?)',c.id,req.session.user.id,JSON.stringify(plan)).lastInsertRowid;
+     planId=q('INSERT INTO ai_course_plans(course_id,created_by,plan_json) VALUES(?,?,?)',c.id,req.session.user.id,encodeCoursePlan(plan)).lastInsertRowid;
      for(let i=0;i<plan.sessions.length;i++){
        const x=plan.sessions[i],date=new Date(startDate);
        date.setDate(date.getDate()+i*7);
@@ -232,27 +235,28 @@ module.exports=function({app,db,q,one,all,auth,role,aiGenerate,flush=async()=>{}
        created.tests++;
      }
    })();
+   await flush();
    res.status(201).json({ok:true,course_id:c.id,plan_id:planId,created,message:'تم إنشاء البرنامج وحفظ الجلسات والمهام والواجبات والاختبارات في لوحة الدورة. العناصر جاهزة للمراجعة والاعتماد.'});
  }));
  // Dedicated course workspace: managers see only pending generated items here. Approved items leave this queue and become learner-facing.
  app.get('/api/ai/course-workflow',auth,role('admin','trainer'),wrap((req,res)=>{
    const c=course(req.query.course_id,req.session.user);
    const sessions=all("SELECT id,title,starts_at,duration,description,instructor_notes,session_number,difficulty_level,learning_goal FROM sessions WHERE course_id=? AND workflow_source='book' ORDER BY session_number,id",c.id);
-   const allItems=all("SELECT id,kind,title,description,status,session_id,session_number,difficulty_level,learning_goal,rubric,quiz_question_count,assessment_json,workflow_state,approved_at,created_at FROM training_activities WHERE course_id=? AND workflow_source='book' ORDER BY session_number,CASE kind WHEN 'tasks' THEN 1 WHEN 'assignments' THEN 2 ELSE 3 END,id",c.id).map(a=>({...a,questions_count:a.quiz_question_count||(()=>{try{return JSON.parse(a.assessment_json||'{}').questions?.length||0}catch{return 0}})()}));
+   const allItems=all("SELECT id,kind,title,description,status,session_id,session_number,difficulty_level,learning_goal,rubric,quiz_question_count,assessment_json,workflow_state,approved_at,created_at,(SELECT COUNT(*) FROM assessment_attempts at WHERE at.activity_id=training_activities.id) has_attempts FROM training_activities WHERE course_id=? AND workflow_source='book' ORDER BY session_number,CASE kind WHEN 'tasks' THEN 1 WHEN 'assignments' THEN 2 ELSE 3 END,id",c.id).map(a=>({...a,questions_count:a.quiz_question_count||(()=>{try{return JSON.parse(a.assessment_json||'{}').questions?.length||0}catch{return 0}})()}));
    const pending=allItems.filter(a=>a.workflow_state==='pending'||(!a.workflow_state&&a.status==='مسودة'));
    const approved=allItems.filter(a=>a.workflow_state==='approved'||(!a.workflow_state&&a.status==='نشط'));
    const discarded=allItems.filter(a=>a.workflow_state==='discarded');
    const latest=one('SELECT id,created_at,plan_json FROM ai_course_plans WHERE course_id=? ORDER BY id DESC LIMIT 1',c.id);
-   let plannedSessions=0;try{plannedSessions=latest?JSON.parse(latest.plan_json).sessions?.length||0:0}catch{}
+   let plannedSessions=0;try{plannedSessions=latest?JSON.parse(decodeCoursePlan(latest.plan_json)).sessions?.length||0:0}catch{}
    const normalActivityCount=one("SELECT count(*) n FROM training_activities WHERE course_id=? AND kind IN ('tasks','assignments','tests') AND COALESCE(workflow_source,'')<>'book'",c.id).n;
    const normalSessionCount=one("SELECT count(*) n FROM sessions WHERE course_id=? AND COALESCE(workflow_source,'')<>'book'",c.id).n;
    res.json({course:c,sessions,pending,approved,discarded,counts:{pending:pending.length,approved:approved.length,discarded:discarded.length,total:allItems.length},plan:latest?{id:latest.id,created_at:latest.created_at,session_count:plannedSessions}:null,diagnostics:{book_sessions:sessions.length,book_activities:allItems.length,other_sessions:normalSessionCount,other_activities:normalActivityCount}});
  }));
- app.post('/api/ai/course-workflow/repair',auth,role('admin'),wrap((req,res)=>{
+ app.post('/api/ai/course-workflow/repair',auth,role('admin'),wrap(async(req,res)=>{
    const c=course(req.body.course_id,req.session.user);
    const saved=one('SELECT id,plan_json FROM ai_course_plans WHERE course_id=? ORDER BY id DESC LIMIT 1',c.id);
    if(!saved)fail('لا توجد خطة محفوظة لهذه الدورة. افتح المولّد وأنشئ البرنامج أولاً.',404);
-   let raw;try{raw=JSON.parse(saved.plan_json)}catch{fail('الخطة المحفوظة تالفة ولا يمكن استعادتها.',409)}
+   let raw;try{raw=JSON.parse(decodeCoursePlan(saved.plan_json))}catch{fail('الخطة المحفوظة تالفة ولا يمكن استعادتها.',409)}
    const plan=validateCoursePlan(raw,raw.sessions?.length,Number(raw.total_hours));
    const start=one('SELECT starts_on FROM courses WHERE id=?',c.id)?.starts_on||new Date().toISOString().slice(0,10);
    const startDate=new Date(`${start}T09:00:00`);
@@ -292,10 +296,33 @@ module.exports=function({app,db,q,one,all,auth,role,aiGenerate,flush=async()=>{}
      }
    })();
    const total=repaired.tasks+repaired.assignments+repaired.tests;
+   await flush();
    res.json({ok:true,course_id:c.id,plan_id:saved.id,repaired,message:`تمت مزامنة الخطة للدورة ${c.id}. جلسات جديدة: ${repaired.sessions}، عناصر جديدة: ${total}، عناصر قديمة تم ربطها بالخطة: ${repaired.linked_existing}.`,repaired});
  }));
- app.post('/api/ai/course-workflow/:id/approve',auth,role('admin','trainer'),wrap((req,res)=>{const a=one("SELECT * FROM training_activities WHERE id=? AND workflow_source='book'",Number(req.params.id));if(!a)fail('العنصر التدريبي غير موجود.',404);course(a.course_id,req.session.user);if(a.workflow_state!=='pending'||a.status!=='مسودة')fail('هذا العنصر لم يعد ضمن قائمة المراجعة.');if(req.body.reviewed!==true)fail('أكد مراجعة التعليمات ومستوى الصعوبة قبل الإتاحة.');if(a.kind==='tests'){let cfg={};try{cfg=JSON.parse(a.assessment_json||'{}')}catch{}if(cfg.type!=='mcq'||!Array.isArray(cfg.questions)||![2,3,5].includes(cfg.questions.length))fail('الاختبار غير مكتمل ولا يمكن إتاحته.');}q("UPDATE training_activities SET status='نشط',workflow_state='approved',approved_at=CURRENT_TIMESTAMP,approved_by=? WHERE id=?",req.session.user.id,a.id);res.json({ok:true,message:'تم اعتماد العنصر وإتاحته للمتدربين.'})}));
- app.post('/api/ai/course-workflow/:id/discard',auth,role('admin','trainer'),wrap((req,res)=>{const a=one("SELECT * FROM training_activities WHERE id=? AND workflow_source='book'",Number(req.params.id));if(!a)fail('العنصر التدريبي غير موجود.',404);course(a.course_id,req.session.user);if(a.workflow_state!=='pending')fail('العنصر لم يعد قيد المراجعة.');q("UPDATE training_activities SET workflow_state='discarded' WHERE id=?",a.id);res.json({ok:true,message:'تم استبعاد العنصر وإخفاؤه من قائمة المراجعة.'})}));
+ app.put('/api/ai/course-workflow/:id',auth,role('admin','trainer'),wrap(async(req,res)=>{
+    const a=one("SELECT * FROM training_activities WHERE id=? AND workflow_source='book'",Number(req.params.id));
+    if(!a)fail('العنصر التدريبي غير موجود.',404);
+    course(a.course_id,req.session.user);
+    const title=String(req.body.title||'').trim(),description=String(req.body.description||'').trim(),rubric=String(req.body.rubric||'').trim(),goal=String(req.body.learning_goal||'').trim(),difficulty=String(req.body.difficulty_level||a.difficulty_level||'تمهيدي');
+    if(!title||title.length>180)fail('اكتب عنواناً لا يتجاوز 180 حرفاً.');
+    if(description.length>20000||rubric.length>10000||goal.length>5000)fail('بعض الحقول تتجاوز الحد المسموح.');
+    if(!['تمهيدي','متوسط','متقدم'].includes(difficulty))fail('مستوى الصعوبة غير صحيح.');
+    let assessment=a.assessment_json||'',questionCount=a.quiz_question_count;
+    if(a.kind==='tests'){
+      const hasAttempts=!!one('SELECT id FROM assessment_attempts WHERE activity_id=? LIMIT 1',a.id);
+      if(!hasAttempts){
+        const questions=req.body.questions;
+        if(!Array.isArray(questions)||![2,3,5].includes(questions.length))fail('يجب أن يحتوي الاختبار على سؤالين أو 3 أو 5 أسئلة.');
+        for(const x of questions)if(!String(x.text||'').trim()||!Array.isArray(x.options)||x.options.length!==3||!Number.isInteger(x.correct)||x.correct<0||x.correct>2)fail('راجع نصوص الأسئلة والاختيارات والإجابات الصحيحة.');
+        assessment=JSON.stringify({type:'mcq',questions});questionCount=questions.length;
+      }
+    }
+    q('UPDATE training_activities SET title=?,description=?,rubric=?,learning_goal=?,difficulty_level=?,assessment_json=?,quiz_question_count=? WHERE id=?',title,description,rubric,goal,difficulty,assessment,questionCount,a.id);
+    await flush();
+    res.json({ok:true,message:'تم حفظ تعديلات العنصر مع الاحتفاظ بحالة الاعتماد وسجلات المتدربين.'});
+  }));
+  app.post('/api/ai/course-workflow/:id/approve',auth,role('admin','trainer'),wrap(async(req,res)=>{const a=one("SELECT * FROM training_activities WHERE id=? AND workflow_source='book'",Number(req.params.id));if(!a)fail('العنصر التدريبي غير موجود.',404);course(a.course_id,req.session.user);if(a.workflow_state!=='pending'||a.status!=='مسودة')fail('هذا العنصر لم يعد ضمن قائمة المراجعة.');if(req.body.reviewed!==true)fail('أكد مراجعة التعليمات ومستوى الصعوبة قبل الإتاحة.');if(a.kind==='tests'){let cfg={};try{cfg=JSON.parse(a.assessment_json||'{}')}catch{}if(cfg.type!=='mcq'||!Array.isArray(cfg.questions)||![2,3,5].includes(cfg.questions.length))fail('الاختبار غير مكتمل ولا يمكن إتاحته.');}q("UPDATE training_activities SET status='نشط',workflow_state='approved',approved_at=CURRENT_TIMESTAMP,approved_by=? WHERE id=?",req.session.user.id,a.id);await flush();res.json({ok:true,message:'تم اعتماد العنصر وإتاحته للمتدربين.'})}));
+ app.post('/api/ai/course-workflow/:id/discard',auth,role('admin','trainer'),wrap(async(req,res)=>{const a=one("SELECT * FROM training_activities WHERE id=? AND workflow_source='book'",Number(req.params.id));if(!a)fail('العنصر التدريبي غير موجود.',404);course(a.course_id,req.session.user);if(a.workflow_state!=='pending')fail('العنصر لم يعد قيد المراجعة.');q("UPDATE training_activities SET workflow_state='discarded' WHERE id=?",a.id);await flush();res.json({ok:true,message:'تم استبعاد العنصر وإخفاؤه من قائمة المراجعة.'})}));
 
  const insightsSchema=object({summary:string,observations:array(string),recommendations:array(string),limitations:array(string)});
  async function buildInsights(req){const u=req.session.user;let stats,cid=null,label='';if(req.body.source_id){const data=await app.locals.externalSheetReport({params:{id:req.body.source_id},query:{gid:req.body.gid,header_row:req.body.header_row,q:req.body.q},session:req.session});cid=data.source.course_id;label=data.source.title+' / '+data.tab.title;const analysis=require('../learning/sheet-analytics')(data,{metric:req.body.metric,category:req.body.category});stats={row_count:analysis.row_count,column_count:analysis.column_count,completeness_percent:analysis.completeness_percent,summary:analysis.summary,histogram:analysis.histogram,distribution:analysis.distribution,category_name:analysis.category_name,trend:analysis.trend,scope:analysis.scope,sort:analysis.sort};}else{const c=course(req.body.course_id,u);cid=c.id;label=c.title;const attempts=one("SELECT count(*) attempts,count(DISTINCT at.trainee_id) participants,avg(CASE WHEN at.score IS NOT NULL AND a.total_score>0 THEN at.score*100.0/a.total_score END) mean_percent,sum(CASE WHEN at.status='submitted' THEN 1 ELSE 0 END) awaiting_review FROM assessment_attempts at JOIN training_activities a ON a.id=at.activity_id WHERE a.course_id=? AND at.status IN ('submitted','reviewed')",c.id);stats={enrolled:one('SELECT count(*) n FROM enrollments WHERE course_id=?',c.id).n,attendance:all('SELECT status,count(*) count FROM attendance WHERE course_id=? GROUP BY status',c.id),assessments:attempts,submissions:one('SELECT count(*) n FROM activity_submissions s JOIN training_activities a ON a.id=s.activity_id WHERE a.course_id=?',c.id).n};}

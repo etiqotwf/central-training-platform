@@ -832,7 +832,8 @@ app.post('/api/library/upload',auth,role('admin','trainer'),async(req,res)=>{
    const opts=Array.isArray(item.options)?item.options.map(clean).filter(Boolean).slice(0,6):[];
    if(clean(item.question)&&opts.length>=2)q('INSERT INTO library_video_questions(resource_id,at_seconds,question,options_json,correct_index,points) VALUES(?,?,?,?,?,?)',r.lastInsertRowid,Math.max(0,Number(item.at_seconds)||0),clean(item.question),JSON.stringify(opts),Math.max(0,Math.min(opts.length-1,Number(item.correct_index)||0)),Math.max(0.25,Math.min(100,Number(item.points)||1)));
   }
-  res.status(201).json({id:r.lastInsertRowid,ok:true});
+  await flushGoogleSheetsWrites();
+   res.status(201).json({id:r.lastInsertRowid,ok:true});
  }catch(e){
   if(tempFile)try{fs.rmSync(tempFile,{force:true})}catch{}
   console.error('Library binary upload failed:',e.stack||e.message);
@@ -857,7 +858,8 @@ app.post("/api/library",auth,role("admin","trainer"),async(req,res)=>{
   else fs.writeFileSync(path.join(uploadDir,stored),bytes,{flag:"wx"});
   const r=q("INSERT INTO library_resources(title,kind,course_id,description,original_name,stored_name,mime_type,size_bytes,uploaded_by) VALUES(?,?,?,?,?,?,?,?,?)",clean(req.body.title),isVideo?"فيديو":clean(req.body.kind)||"مرجع",courseId,clean(req.body.description),path.basename(clean(req.body.original_name)),storage,match[1],bytes.length,req.session.user.id);
   if(isVideo&&Array.isArray(req.body.questions))for(const item of req.body.questions){const opts=Array.isArray(item.options)?item.options.map(clean).filter(Boolean).slice(0,6):[];if(clean(item.question)&&opts.length>=2){q('INSERT INTO library_video_questions(resource_id,at_seconds,question,options_json,correct_index,points) VALUES(?,?,?,?,?,?)',r.lastInsertRowid,Math.max(0,Number(item.at_seconds)||0),clean(item.question),JSON.stringify(opts),Math.max(0,Math.min(opts.length-1,Number(item.correct_index)||0)));}}
-  res.status(201).json({id:r.lastInsertRowid,ok:true});
+  await flushGoogleSheetsWrites();
+   res.status(201).json({id:r.lastInsertRowid,ok:true});
  }catch(e){handleError(res,e);}
 });
 app.get("/api/library/:id/watch",auth,(req,res)=>{
@@ -923,6 +925,36 @@ app.get("/api/library/:id/download",auth,async(req,res)=>{
  const r=one("SELECT * FROM library_resources WHERE id=?",Number(req.params.id));if(!libraryResourceAccess(req,r))return res.status(r?403:404).json({error:"ليس لديك صلاحية لفتح هذه المادة."});
  if(r.stored_name.startsWith('drive:')){try{return await streamLibraryDriveFile(r.stored_name.slice(6),req,res,r.mime_type,r.original_name)}catch(e){console.error('Library Drive download failed:',e.message);return res.status(502).json({error:'تعذر تنزيل الملف من Google Drive. تحقق من صلاحيات حساب الخدمة ومجلد التخزين.'})}}
  const file=path.join(uploadDir,path.basename(r.stored_name));if(!fs.existsSync(file))return res.status(404).json({error:"ملف التخزين غير موجود على الخادم."});res.download(file,r.original_name);
+});
+app.put('/api/library/:id',auth,role('admin','trainer'),async(req,res)=>{
+ const r=one('SELECT * FROM library_resources WHERE id=? AND parent_resource_id IS NULL',Number(req.params.id));
+ if(!r)return res.status(404).json({error:'عنصر المكتبة غير موجود.'});
+ if(!libraryResourceAccess(req,r))return res.status(403).json({error:'ليس لديك صلاحية تعديل هذا العنصر.'});
+ const title=clean(req.body.title),kind=clean(req.body.kind)||r.kind,description=String(req.body.description??r.description??'').slice(0,10000),courseId=req.body.course_id?Number(req.body.course_id):null;
+ if(!title||title.length>180)return res.status(400).json({error:'اكتب عنواناً صحيحاً للمادة.'});
+ if(courseId&&!one('SELECT id FROM courses WHERE id=?',courseId))return res.status(400).json({error:'الدورة المحددة غير موجودة.'});
+ if(one('SELECT id FROM library_resources WHERE parent_resource_id=? LIMIT 1',r.id)&&kind!=='فيديو')return res.status(400).json({error:'هذا العنصر يحتوي على فيديوهات مرتبطة؛ لا يمكن تغيير نوعه عن فيديو.'});
+ if(req.session.user.role==='trainer'){const t=one('SELECT id FROM trainers WHERE user_id=?',req.session.user.id);if(!courseId||!t||!one('SELECT id FROM courses WHERE id=? AND trainer_id=?',courseId,t.id))return res.status(403).json({error:'يمكنك تعديل مواد دوراتك فقط.'});}
+ let storedName=r.stored_name,originalName=r.original_name,mimeType=r.mime_type,sizeBytes=r.size_bytes,temp='';
+ if(req.body.file&&req.body.file.data){
+  const name=path.basename(clean(req.body.file.name)),ext=path.extname(name).toLowerCase(),isVideo=kind==='فيديو',limit=isVideo?LIBRARY_VIDEO_LIMIT:LIBRARY_FILE_LIMIT;
+  const raw=String(req.body.file.data);if(!/^[A-Za-z0-9+/]*={0,2}$/.test(raw))return res.status(400).json({error:'بيانات الملف البديل غير صحيحة.'});
+  const bytes=Buffer.from(raw,'base64');if(!bytes.length||bytes.length>limit)return res.status(413).json({error:`الحد الأقصى ${isVideo?100:50} ميجابايت.`});
+  if(isVideo&&!['.mp4','.webm','.mov','.m4v'].includes(ext))return res.status(400).json({error:'صيغة الفيديو غير مدعومة.'});
+  if(!isVideo&&bytes.length>LIBRARY_FILE_LIMIT)return res.status(413).json({error:'الحد الأقصى 50 ميجابايت.'});
+  const tempName=`replace-${Date.now()}-${crypto.randomBytes(6).toString('hex')}${ext}`;temp=path.join(uploadDir,tempName);fs.writeFileSync(temp,bytes,{flag:'wx'});
+  try{
+   if(googleBridge.configured()){const uploaded=await googleBridge.uploadFile(temp,name,clean(req.body.file.mime_type)||'application/octet-stream',bytes.length);storedName='drive:'+uploaded.id;fs.rmSync(temp,{force:true});temp='';}
+   else if(libraryDriveCredentials()){const uploaded=await uploadLibraryFileToDrive(temp,{original_name:name,mime_type:clean(req.body.file.mime_type)||'application/octet-stream'});storedName='drive:'+uploaded;fs.rmSync(temp,{force:true});temp='';}
+   else if(production)throw new Error('تعذر إعداد مخزن الملفات الدائم على الخادم.');
+   else{const finalName=`${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`;fs.renameSync(temp,path.join(uploadDir,finalName));temp='';storedName=finalName;}
+  }catch(error){if(temp)fs.rmSync(temp,{force:true});throw error;}
+  originalName=name;mimeType=clean(req.body.file.mime_type)||'application/octet-stream';sizeBytes=bytes.length;
+ }
+ q('UPDATE library_resources SET title=?,kind=?,course_id=?,description=?,original_name=?,stored_name=?,mime_type=?,size_bytes=? WHERE id=?',title,kind,courseId,description,originalName,storedName,mimeType,sizeBytes,r.id);if(kind==='فيديو')q('UPDATE library_resources SET course_id=? WHERE parent_resource_id=?',courseId,r.id);
+ if(storedName!==r.stored_name&&!String(r.stored_name).startsWith('drive:')&&one('SELECT COUNT(*) n FROM library_resources WHERE stored_name=?',r.stored_name).n<=1)fs.rmSync(path.join(uploadDir,path.basename(r.stored_name)),{force:true});
+ await flushGoogleSheetsWrites();
+ res.json({ok:true,message:'تم حفظ تعديلات عنصر المكتبة.'});
 });
 app.delete("/api/library/:id",auth,role("admin"),(req,res)=>{const r=one("SELECT * FROM library_resources WHERE id=?",Number(req.params.id));if(!r)return res.status(404).json({error:"المرجع غير موجود."});try{const rows=r.parent_resource_id?all('SELECT * FROM library_resources WHERE id=?',r.id):all('SELECT * FROM library_resources WHERE id=? OR parent_resource_id=?',r.id,r.id);for(const item of rows)if(!item.stored_name.startsWith('drive:')&&one('SELECT COUNT(*) n FROM library_resources WHERE stored_name=?',item.stored_name).n<=1)fs.rmSync(path.join(uploadDir,path.basename(item.stored_name)),{force:true});q("DELETE FROM library_resources WHERE id=?",r.parent_resource_id||r.id);res.json({ok:true});}catch(e){handleError(res,e);}});
 
