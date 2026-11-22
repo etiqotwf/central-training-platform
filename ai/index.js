@@ -190,11 +190,12 @@ module.exports=function({app,db,q,one,all,auth,role,aiGenerate,flush=async()=>{}
  const planQuestion=object({text:string,options:array(string),correct:{type:'integer'},skill:string});
  const planSession=object({title:string,objectives:array(string),topics:array(string),instructor_notes:string,duration_minutes:{type:'integer'},task:string,assignment:string,questions:array(planQuestion)});
  const coursePlanSchema=object({summary:string,total_hours:{type:'number'},sessions:array(planSession)});
- function validateCoursePlan(p,sessionCount,hours){
+ function validateCoursePlan(p,sessionCount,hours,questionsPerTest=null){
    if(!p||!Array.isArray(p.sessions)||p.sessions.length!==sessionCount)fail('عدد الجلسات في الخطة غير مطابق للعدد المطلوب.',502);
+   if(questionsPerTest!==null&&(!Number.isInteger(Number(questionsPerTest))||Number(questionsPerTest)<1||Number(questionsPerTest)>30))fail('عدد أسئلة الاختبار يجب أن يكون من 1 إلى 30.');
    let sum=0;
    for(const [i,x] of p.sessions.entries()){
-     if(!x.title?.trim()||!Array.isArray(x.objectives)||!x.objectives.length||!Array.isArray(x.topics)||!x.topics.length||!x.instructor_notes?.trim()||!Number.isInteger(x.duration_minutes)||x.duration_minutes<15||x.duration_minutes>600||!x.task?.trim()||!x.assignment?.trim()||!Array.isArray(x.questions)||![2,3,5].includes(x.questions.length))fail(`محتوى الجلسة ${i+1} غير مكتمل. أعد إنشاء البرنامج.`,502);
+     if(!x.title?.trim()||!Array.isArray(x.objectives)||!x.objectives.length||!Array.isArray(x.topics)||!x.topics.length||!x.instructor_notes?.trim()||!Number.isInteger(x.duration_minutes)||x.duration_minutes<15||x.duration_minutes>600||!x.task?.trim()||!x.assignment?.trim()||!Array.isArray(x.questions)||x.questions.length<1||x.questions.length>30||(questionsPerTest!==null&&x.questions.length!==Number(questionsPerTest)))fail(`محتوى الجلسة ${i+1} غير مكتمل أو عدد أسئلة الاختبار غير مطابق للعدد المحدد. أعد إنشاء البرنامج.`,502);
      if(!['تمهيدي','متوسط','متقدم'].includes(x.difficulty||''))fail(`مستوى صعوبة الجلسة ${i+1} غير محدد.`,502);
      sum+=x.duration_minutes;
      for(const qx of x.questions)if(!qx.text?.trim()||!Array.isArray(qx.options)||qx.options.length!==3||!Number.isInteger(qx.correct)||qx.correct<0||qx.correct>=qx.options.length||!qx.skill?.trim())fail(`أسئلة الجلسة ${i+1} غير صالحة.`,502);
@@ -204,11 +205,12 @@ module.exports=function({app,db,q,one,all,auth,role,aiGenerate,flush=async()=>{}
    if(JSON.stringify(p).length>220000)fail('الخطة الناتجة أكبر من حد التخزين الآمن. قلل عدد الجلسات أو أعد المحاولة.',502);
    return p;
  }
- app.post('/api/ai/course-plan/generate',auth,role('admin'),wrap(async(req,res)=>{const c=course(req.body.course_id,req.session.user),count=Number(req.body.sessions),hours=Number(req.body.hours),content=String(req.body.content||'').trim();if(!Number.isInteger(count)||count<1||count>20||!Number.isFinite(hours)||hours<1||hours>200||hours*60<count*15||hours*60>count*600||content.length<80||content.length>500000)fail('حدد من 1 إلى 20 جلسة وإجمالي ساعات من 1 إلى 200، وارفق مادة علمية قابلة للاستخراج حتى 500 ألف حرف.');const plan=buildRuleBasedPlan({courseTitle:c.title,count,hours,content,sourceTitle:String(req.body.source_title||'المادة العلمية'),level:String(req.body.level||'مبتدئ'),notes:String(req.body.notes||'')});res.json({plan:validateCoursePlan(plan,count,hours),source_title:String(req.body.source_title||'المادة العلمية'),generator:'progressive-rule-based',uses_ai:false})}));
+ app.post('/api/ai/course-plan/generate',auth,role('admin'),wrap(async(req,res)=>{const c=course(req.body.course_id,req.session.user),count=Number(req.body.sessions),hours=Number(req.body.hours),questionsPerTest=Number(req.body.questions_per_test||5),content=String(req.body.content||'').trim();if(!Number.isInteger(count)||count<1||count>20||!Number.isFinite(hours)||hours<1||hours>200||hours*60<count*15||hours*60>count*600||!Number.isInteger(questionsPerTest)||questionsPerTest<1||questionsPerTest>30||content.length<80||content.length>500000)fail('حدد من 1 إلى 20 جلسة، وعدد أسئلة من 1 إلى 30، وإجمالي ساعات صحيح، وارفق مادة علمية قابلة للاستخراج حتى 500 ألف حرف.');const plan=buildRuleBasedPlan({courseTitle:c.title,count,hours,content,sourceTitle:String(req.body.source_title||'المادة العلمية'),level:String(req.body.level||'مبتدئ'),notes:String(req.body.notes||''),questionsPerTest});res.json({plan:validateCoursePlan(plan,count,hours,questionsPerTest),questions_per_test:questionsPerTest,source_title:String(req.body.source_title||'المادة العلمية'),generator:'progressive-rule-based',uses_ai:false})}));
  app.post('/api/ai/course-plan/apply',auth,role('admin'),wrap(async(req,res)=>{
    const c=course(req.body.course_id,req.session.user),p=req.body.plan;
    if(!p||!Array.isArray(p.sessions)||p.sessions.length<1||p.sessions.length>20)fail('الخطة غير صالحة.');
-   const plan=validateCoursePlan(p,p.sessions.length,Number(p.total_hours));
+   const questionsPerTest=req.body.questions_per_test===undefined?null:Number(req.body.questions_per_test);
+   const plan=validateCoursePlan(p,p.sessions.length,Number(p.total_hours),questionsPerTest);
    const created={sessions:0,tasks:0,assignments:0,tests:0};
    const start=one('SELECT starts_on FROM courses WHERE id=?',c.id)?.starts_on||new Date().toISOString().slice(0,10);
    const startDate=new Date(`${start}T09:00:00`);
@@ -311,9 +313,24 @@ module.exports=function({app,db,q,one,all,auth,role,aiGenerate,flush=async()=>{}
     if(a.kind==='tests'){
       const hasAttempts=!!one('SELECT id FROM assessment_attempts WHERE activity_id=? LIMIT 1',a.id);
       if(!hasAttempts){
-        const questions=req.body.questions;
-        if(!Array.isArray(questions)||![2,3,5].includes(questions.length))fail('يجب أن يحتوي الاختبار على سؤالين أو 3 أو 5 أسئلة.');
-        for(const x of questions)if(!String(x.text||'').trim()||!Array.isArray(x.options)||x.options.length!==3||!Number.isInteger(x.correct)||x.correct<0||x.correct>2)fail('راجع نصوص الأسئلة والاختيارات والإجابات الصحيحة.');
+        const requestedCount=Number(req.body.question_count||req.body.questions?.length||questionCount||5);
+        if(!Number.isInteger(requestedCount)||requestedCount<1||requestedCount>30)fail('حدد عددًا صحيحًا من 1 إلى 30 سؤالًا.');
+        const submitted=Array.isArray(req.body.questions)?req.body.questions:[];
+        const validQuestion=x=>x&&typeof x.text==='string'&&x.text.trim()&&Array.isArray(x.options)&&x.options.length===3&&x.options.every(o=>typeof o==='string'&&o.trim())&&Number.isInteger(Number(x.correct))&&Number(x.correct)>=0&&Number(x.correct)<=2;
+        let generated=[];
+        if(submitted.length<requestedCount||submitted.slice(0,requestedCount).some(x=>!validQuestion(x))){
+          const session=a.session_id?one('SELECT title,instructor_notes,description FROM sessions WHERE id=?',a.session_id):null;
+          const sourceText=String(session?.instructor_notes||session?.description||'')+'\n'+String(a.description||'')+'\n'+submitted.map(x=>String(x?.text||'')).join('\n');
+          if(sourceText.replace(/\s/g,'').length<24)fail('لا توجد مادة مرجعية كافية لاستكمال الأسئلة تلقائيًا. أضف أسئلة مكتملة أو أرفق شرح الجلسة.');
+          const generatedPlan=buildRuleBasedPlan({courseTitle:session?.title||a.title,count:1,hours:1,content:sourceText,sourceTitle:'المادة المرجعية للجلسة',level:difficulty,questionsPerTest:requestedCount});
+          generated=generatedPlan.sessions[0].questions;
+        }
+        const questions=Array.from({length:requestedCount},(_,i)=>{
+          const x=submitted[i];
+          if(validQuestion(x))return {text:String(x.text).trim(),options:x.options.map(o=>String(o).trim()),correct:Number(x.correct),skill:String(x.skill||'مراجعة').slice(0,200)};
+          const g=generated[i]||generated[generated.length-1];
+          return {text:g.text,options:g.options,correct:g.correct,skill:g.skill||'مراجعة'};
+        });
         assessment=JSON.stringify({type:'mcq',questions});questionCount=questions.length;
       }
     }
@@ -321,7 +338,7 @@ module.exports=function({app,db,q,one,all,auth,role,aiGenerate,flush=async()=>{}
     await flush();
     res.json({ok:true,message:'تم حفظ تعديلات العنصر مع الاحتفاظ بحالة الاعتماد وسجلات المتدربين.'});
   }));
-  app.post('/api/ai/course-workflow/:id/approve',auth,role('admin','trainer'),wrap(async(req,res)=>{const a=one("SELECT * FROM training_activities WHERE id=? AND workflow_source='book'",Number(req.params.id));if(!a)fail('العنصر التدريبي غير موجود.',404);course(a.course_id,req.session.user);if(a.workflow_state!=='pending'||a.status!=='مسودة')fail('هذا العنصر لم يعد ضمن قائمة المراجعة.');if(req.body.reviewed!==true)fail('أكد مراجعة التعليمات ومستوى الصعوبة قبل الإتاحة.');if(a.kind==='tests'){let cfg={};try{cfg=JSON.parse(a.assessment_json||'{}')}catch{}if(cfg.type!=='mcq'||!Array.isArray(cfg.questions)||![2,3,5].includes(cfg.questions.length))fail('الاختبار غير مكتمل ولا يمكن إتاحته.');}q("UPDATE training_activities SET status='نشط',workflow_state='approved',approved_at=CURRENT_TIMESTAMP,approved_by=? WHERE id=?",req.session.user.id,a.id);await flush();res.json({ok:true,message:'تم اعتماد العنصر وإتاحته للمتدربين.'})}));
+  app.post('/api/ai/course-workflow/:id/approve',auth,role('admin','trainer'),wrap(async(req,res)=>{const a=one("SELECT * FROM training_activities WHERE id=? AND workflow_source='book'",Number(req.params.id));if(!a)fail('العنصر التدريبي غير موجود.',404);course(a.course_id,req.session.user);if(a.workflow_state!=='pending'||a.status!=='مسودة')fail('هذا العنصر لم يعد ضمن قائمة المراجعة.');if(req.body.reviewed!==true)fail('أكد مراجعة التعليمات ومستوى الصعوبة قبل الإتاحة.');if(a.kind==='tests'){let cfg={};try{cfg=JSON.parse(a.assessment_json||'{}')}catch{}if(cfg.type!=='mcq'||!Array.isArray(cfg.questions)||cfg.questions.length<1||cfg.questions.length>30||cfg.questions.some(x=>!String(x.text||'').trim()||!Array.isArray(x.options)||x.options.length!==3||!Number.isInteger(x.correct)||x.correct<0||x.correct>2))fail('الاختبار غير مكتمل ولا يمكن إتاحته.');}q("UPDATE training_activities SET status='نشط',workflow_state='approved',approved_at=CURRENT_TIMESTAMP,approved_by=? WHERE id=?",req.session.user.id,a.id);await flush();res.json({ok:true,message:'تم اعتماد العنصر وإتاحته للمتدربين.'})}));
  app.post('/api/ai/course-workflow/:id/discard',auth,role('admin','trainer'),wrap(async(req,res)=>{const a=one("SELECT * FROM training_activities WHERE id=? AND workflow_source='book'",Number(req.params.id));if(!a)fail('العنصر التدريبي غير موجود.',404);course(a.course_id,req.session.user);if(a.workflow_state!=='pending')fail('العنصر لم يعد قيد المراجعة.');q("UPDATE training_activities SET workflow_state='discarded' WHERE id=?",a.id);await flush();res.json({ok:true,message:'تم استبعاد العنصر وإخفاؤه من قائمة المراجعة.'})}));
 
  const insightsSchema=object({summary:string,observations:array(string),recommendations:array(string),limitations:array(string)});

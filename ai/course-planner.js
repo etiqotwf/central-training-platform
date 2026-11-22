@@ -1,7 +1,7 @@
 'use strict';
 // Deterministic course plan builder. No AI provider or external service is called.
 const fail=message=>{throw new Error(message)};
-function buildRuleBasedPlan({courseTitle,count,hours,content,sourceTitle,level,notes}){
+function buildRuleBasedPlan({courseTitle,count,hours,content,sourceTitle,level,notes,questionsPerTest=null}){
    const clean=String(content||'').replace(/\r/g,'').replace(/[ \t]+/g,' ').trim();
    const paragraphs=clean.split(/\n+/).map(x=>x.replace(/^\s*[#*\-]+\s*/,'').trim()).filter(x=>x.length>=24);
    const sentences=clean.split(/(?<=[.!؟?])\s+|\n+/).map(x=>x.trim()).filter(x=>x.length>=24);
@@ -13,9 +13,9 @@ function buildRuleBasedPlan({courseTitle,count,hours,content,sourceTitle,level,n
    const levelName=n=>n===1?'تمهيدي':n===2?'متوسط':'متقدم';
    const clip=(v,n=220)=>String(v||'').replace(/\s+/g,' ').trim().slice(0,n);
    const cleanTitle=(items,i)=>{const candidate=items.find(x=>x.length>=18&&x.length<=64)||items[0]||'';let line=clip(candidate,150).replace(/[.!؟:؛،]+$/,'');if(line.length>64)line=line.split(/\s+/).slice(0,7).join(' ');return line.length>=8?line:`المحور التدريبي ${i+1}`};
-   const makeQuestions=(chosen,title,difficulty,sessionIndex,count)=>{
+   const makeQuestions=(chosen,title,difficulty,sessionIndex)=>{
      const anchors=chosen.flatMap(x=>x.split(/(?<=[.!؟?])\s+/).map(v=>v.trim()).filter(v=>v.length>=24));if(!anchors.length)anchors.push(...chosen.filter(x=>x.length>=24));const distractorPool=units.filter(x=>!chosen.includes(x)&&x.length>=24);
-     const wanted=difficulty===1?2:difficulty===2?3:5;
+     const wanted=questionsPerTest===null||questionsPerTest===undefined?(difficulty===1?2:difficulty===2?3:5):Math.max(1,Math.min(30,Number(questionsPerTest)||5));
      return Array.from({length:wanted},(_,j)=>{
        const anchor=clip(anchors[j%Math.max(1,anchors.length)]||chosen[0]||title,220);
        const distractors=[];
@@ -52,7 +52,7 @@ function buildRuleBasedPlan({courseTitle,count,hours,content,sourceTitle,level,n
      const excerpt=chosen.join('\n').slice(0,5200);
      return {title,objectives:[objective,`أن تقدم دليلًا عمليًا على فهمك للمحور في صورة شرح أو تطبيق مناسب لمستوى ${levelName(difficulty)}.`],topics,instructor_notes:`دليل المحاضر للجلسة ${i+1} — المصدر: ${sourceTitle||courseTitle}\n\nالمحتوى المرجعي الموزع على الجلسة:\n${excerpt}\n\nالهدف من الجلسة: ${objective}\nمستوى التدرج: ${levelName(difficulty)}. ابدأ بالمفاهيم الأساسية، ثم انتقل إلى الشرح والتطبيق وفق مستوى الجلسة.`,duration_minutes:base+(i<extra?1:0),difficulty:levelName(difficulty),learning_goal:objective,task,assignment,questions:makeQuestions(chosen,title,difficulty,i)};
    });
-   return {summary:`برنامج «${courseTitle}» مبني على ${sourceTitle||'المادة العلمية'}، مع تدرج تلقائي من ${levelName(baseLevel)} إلى مستويات أعلى بحسب ترتيب الجلسات. لكل جلسة شرح للمحاضر، مهمة ينجزها المتدرب بنفسه، واجب مذاكرة، واختبار قصير من 2 أو 3 أو 5 أسئلة وفق مستوى الصعوبة. هذا تنظيم قائم على قواعد برمجية ومحتوى المصدر، وليس توليدًا بنموذج ذكاء اصطناعي. ${notes?`ملاحظات الإدارة: ${String(notes).slice(0,500)}`:''}`,total_hours:Number((totalMinutes/60).toFixed(2)),sessions};
+   return {summary:`برنامج «${courseTitle}» مبني على ${sourceTitle||'المادة العلمية'}، مع تدرج تلقائي من ${levelName(baseLevel)} إلى مستويات أعلى بحسب ترتيب الجلسات. لكل جلسة شرح للمحاضر، مهمة ينجزها المتدرب بنفسه، واجب مذاكرة، واختبار قصير ${questionsPerTest===null||questionsPerTest===undefined?'من 2 أو 3 أو 5 أسئلة وفق مستوى الصعوبة':`من ${Math.max(1,Math.min(30,Number(questionsPerTest)||5))} سؤالًا حسب العدد المحدد`}. هذا تنظيم قائم على قواعد برمجية ومحتوى المصدر، وليس توليدًا بنموذج ذكاء اصطناعي. ${notes?`ملاحظات الإدارة: ${String(notes).slice(0,500)}`:''}`,total_hours:Number((totalMinutes/60).toFixed(2)),sessions};
  }
 
 module.exports=buildRuleBasedPlan;
