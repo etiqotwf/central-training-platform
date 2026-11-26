@@ -1,0 +1,9 @@
+{
+  "appId": "org.centraltraining.platform",
+  "appName": "منصة الإدارة المركزية للتدريب",
+  "webDir": "public",
+  "server": {
+    "url": "https://REPLACE-WITH-YOUR-PRODUCTION-DOMAIN",
+    "androidScheme": "https"
+  }
+}

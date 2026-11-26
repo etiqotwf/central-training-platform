@@ -1,0 +1,17 @@
+{
+  "id": "/",
+  "name": "منصة الإدارة المركزية للتدريب",
+  "short_name": "منصة التدريب",
+  "description": "منصة الإدارة المركزية للتدريب والتعليم",
+  "lang": "ar",
+  "dir": "rtl",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f5f7f6",
+  "theme_color": "#173f43",
+  "icons": [
+    { "src": "/central-training-logo-source.png", "sizes": "any", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

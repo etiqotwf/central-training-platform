@@ -517,6 +517,19 @@ app.post("/api/trainers", auth, role("admin"), async (req, res) => {
   } catch (e) { handleError(res, e); }
 });
 
+// Per-course image gallery. Images are stored in the same persistent upload volume as library files.
+db.exec(`CREATE TABLE IF NOT EXISTS course_gallery_images (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+ original_name TEXT NOT NULL, stored_name TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+ uploaded_by INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`);
+function courseAccess(req, courseId){const u=req.session.user;if(u.role==='admin')return true;if(u.role==='trainer'){const t=one('SELECT id FROM trainers WHERE user_id=?',u.id);return !!(t&&one('SELECT id FROM courses WHERE id=? AND trainer_id=?',courseId,t.id));}const t=one('SELECT id FROM trainees WHERE user_id=?',u.id);return !!(t&&one('SELECT id FROM enrollments WHERE course_id=? AND trainee_id=?',courseId,t.id));}
+app.get('/api/courses/:id/gallery',auth,(req,res)=>{const id=Number(req.params.id);if(!courseAccess(req,id))return res.sendStatus(403);res.json(all('SELECT id,course_id,original_name,mime_type,size_bytes,created_at FROM course_gallery_images WHERE course_id=? ORDER BY id DESC',id));});
+app.post('/api/courses/:id/gallery',auth,role('admin','trainer'),(req,res)=>{const id=Number(req.params.id);if(!courseAccess(req,id))return res.sendStatus(403);const data=String(req.body.data||'');const m=data.match(/^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/=]+)$/);if(!m)return res.status(400).json({error:'اختر صورة JPG أو PNG أو WEBP أو GIF.'});const bytes=Buffer.from(m[2],'base64');if(!bytes.length||bytes.length>12*1024*1024)return res.status(413).json({error:'الحد الأقصى للصورة 12 ميجابايت.'});const ext={ 'image/jpeg':'.jpg','image/png':'.png','image/webp':'.webp','image/gif':'.gif'}[m[1]];const name=`course-${id}-${Date.now()}-${crypto.randomBytes(5).toString('hex')}${ext}`;fs.writeFileSync(path.join(uploadDir,name),bytes,{flag:'wx'});const r=q('INSERT INTO course_gallery_images(course_id,original_name,stored_name,mime_type,size_bytes,uploaded_by) VALUES(?,?,?,?,?,?)',id,path.basename(clean(req.body.name)||`course-image${ext}`),name,m[1],bytes.length,req.session.user.id);res.status(201).json({id:r.lastInsertRowid,ok:true});});
+app.get('/api/courses/:id/gallery/:imageId/file',auth,(req,res)=>{const id=Number(req.params.id);if(!courseAccess(req,id))return res.sendStatus(403);const r=one('SELECT * FROM course_gallery_images WHERE id=? AND course_id=?',Number(req.params.imageId),id);if(!r)return res.sendStatus(404);const f=path.join(uploadDir,path.basename(r.stored_name));if(!fs.existsSync(f))return res.sendStatus(404);res.type(r.mime_type).sendFile(f);});
+app.get('/api/courses/:id/gallery/:imageId/download',auth,(req,res)=>{const id=Number(req.params.id);if(!courseAccess(req,id))return res.sendStatus(403);const r=one('SELECT * FROM course_gallery_images WHERE id=? AND course_id=?',Number(req.params.imageId),id);if(!r)return res.sendStatus(404);const f=path.join(uploadDir,path.basename(r.stored_name));if(!fs.existsSync(f))return res.sendStatus(404);res.download(f,r.original_name);});
+app.delete('/api/courses/:id/gallery/:imageId',auth,role('admin','trainer'),(req,res)=>{const id=Number(req.params.id);if(!courseAccess(req,id))return res.sendStatus(403);const r=one('SELECT * FROM course_gallery_images WHERE id=? AND course_id=?',Number(req.params.imageId),id);if(!r)return res.sendStatus(404);fs.rmSync(path.join(uploadDir,path.basename(r.stored_name)),{force:true});q('DELETE FROM course_gallery_images WHERE id=?',r.id);res.json({ok:true});});
+
 app.get("/api/courses", auth, (req, res) => {
   const u = req.session.user;
   if (u.role === "admin") return res.json(all(`SELECT c.*,t.name AS trainer_name,(SELECT COUNT(*) FROM enrollments e WHERE e.course_id=c.id) trainee_count
@@ -862,6 +875,8 @@ app.post("/api/library",auth,role("admin","trainer"),async(req,res)=>{
    res.status(201).json({id:r.lastInsertRowid,ok:true});
  }catch(e){handleError(res,e);}
 });
+app.get('/api/library/videos-list',auth,(req,res)=>{const u=req.session.user;let rows=all("SELECT * FROM library_resources WHERE kind='فيديو' ORDER BY created_at DESC");rows=rows.filter(r=>libraryResourceAccess(req,r));res.json(rows.map(r=>({id:r.id,title:r.title,original_name:r.original_name,course_id:r.course_id,parent_resource_id:r.parent_resource_id})));});
+app.patch('/api/library/:id/move',auth,role('admin','trainer'),(req,res)=>{const id=Number(req.params.id),target=Number(req.body.parent_resource_id);const video=one('SELECT * FROM library_resources WHERE id=? AND kind=\'فيديو\'',id);const parent=one('SELECT * FROM library_resources WHERE id=? AND kind=\'فيديو\' AND parent_resource_id IS NULL',target);if(!video||!parent||video.id===parent.id)return res.status(400).json({error:'اختر فيديو وعنصر فيديو رئيسيًا صالحًا.'});if(!libraryResourceAccess(req,video)||!libraryResourceAccess(req,parent))return res.sendStatus(403);if(video.course_id!==parent.course_id)return res.status(400).json({error:'يجب أن تكون الفيديوهات في الدورة نفسها لنقلها بين البانلات.'});q('UPDATE library_resources SET parent_resource_id=? WHERE id=?',parent.id,video.id);res.json({ok:true});});
 app.get("/api/library/:id/watch",auth,(req,res)=>{
  const r=one('SELECT * FROM library_resources WHERE id=?',Number(req.params.id));if(!libraryResourceAccess(req,r))return res.status(r?403:404).json({error:r?'ليس لديك صلاحية لعرض هذه المادة.':'المادة غير موجودة.'});
  if(r.kind!=='فيديو')return res.status(400).json({error:'هذه المادة ليست فيديو.'});
