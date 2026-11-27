@@ -143,7 +143,7 @@ function platformCreateUploadSession_(p, folder) {
     throw new Error('حجم الملف غير صالح. الحد الأقصى 100 ميجابايت.');
   }
 
-  const allowed = /\.(docx?|xlsx?|pptx?|pdf|txt|png|jpe?g|gif|webp|zip|mp4|webm|mov|m4v)$/i;
+  const allowed = /\.(docx?|xlsx?|pptx?|pdf|txt|png|jpe?g|gif|webp|zip|7z|rar|tar|gz|tgz|xz|msi|exe|msix|appx|dmg|pkg|deb|rpm|appimage|apk|jar)$/i;
   if (!allowed.test(name)) {
     throw new Error('نوع الملف غير مدعوم.');
   }
@@ -545,7 +545,7 @@ function platformBridge_(e) {
 
 
       if (
-        !/\.(docx?|xlsx?|pptx?|pdf|txt|png|jpe?g|zip)$/i
+        !/\.(docx?|xlsx?|pptx?|pdf|txt|png|jpe?g|zip|7z|rar|tar|gz|tgz|xz|msi|exe|msix|appx|dmg|pkg|deb|rpm|appimage|apk|jar)$/i
           .test(name)
       ) {
 
