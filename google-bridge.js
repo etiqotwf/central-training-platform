@@ -2,10 +2,12 @@
 const crypto=require('node:crypto');
 const fs=require('node:fs/promises');
 function archiveConfig(){
- const hasDedicated=Boolean(process.env.ARCHIVE_SCRIPT_URL||process.env.ARCHIVE_BRIDGE_SECRET);
- return hasDedicated
-  ? {url:String(process.env.ARCHIVE_SCRIPT_URL||'').trim(),secret:String(process.env.ARCHIVE_BRIDGE_SECRET||'')}
-  : {url:String(process.env.PLATFORM_SCRIPT_URL||'').trim(),secret:String(process.env.PLATFORM_BRIDGE_SECRET||'')};
+ // Central Training Platform uses the PLATFORM bridge. Keep ARCHIVE variables
+ // only as a backward-compatible fallback when PLATFORM variables are absent.
+ const platformUrl=String(process.env.PLATFORM_SCRIPT_URL||'').trim();
+ const platformSecret=String(process.env.PLATFORM_BRIDGE_SECRET||'');
+ if(platformUrl||platformSecret) return {url:platformUrl,secret:platformSecret};
+ return {url:String(process.env.ARCHIVE_SCRIPT_URL||'').trim(),secret:String(process.env.ARCHIVE_BRIDGE_SECRET||'')};
 }
 function configured(){const c=archiveConfig();return Boolean(c.url&&c.secret)}
 async function call(action,data={},requestId=crypto.randomUUID()){
@@ -20,7 +22,7 @@ async function call(action,data={},requestId=crypto.randomUUID()){
  if(!r.ok||!result.success)throw Error(result.error||'فشلت عملية Google.');return result;
 }
 async function upload(name,mime,base64){const r=await call('platformUpload',{name,mime,base64});return {id:r.id,url:r.url}}
-// Resumable Drive upload: transfer the file in 8 MiB chunks, matching the British project.
+// Resumable Drive upload: transfer the file in 8 MiB chunks to the Central Drive bridge.
 async function uploadFile(filePath,name,mime,size){
  const session=await call('platformCreateUploadSession',{name,mime:mime||'application/octet-stream',size:Number(size)});
  const uploadUrl=String(session.uploadUrl||'');let parsed;

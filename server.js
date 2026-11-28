@@ -802,16 +802,16 @@ app.post('/api/library/upload',auth,role('admin','trainer'),async(req,res)=>{
   const videoExts=new Set(['.mp4','.webm','.mov','.m4v']);
   if(isVideo&&!videoExts.has(ext))return res.status(400).json({error:'صيغة الفيديو غير مدعومة. استخدم MP4 أو WEBM أو MOV أو M4V.'});
   if(isVideo&&!/^video\//i.test(mimeType)&&mimeType!=='application/octet-stream')return res.status(400).json({error:'نوع ملف الفيديو غير صالح.'});
-  const isProgram=kind==='برنامج قابل للتنزيل';if(isProgram&&req.session.user.role!=='admin')return res.status(403).json({error:'رفع البرامج القابلة للتنزيل متاح للمدير فقط.'});const programExts=new Set(['.exe','.msi','.msix','.appx','.dmg','.pkg','.deb','.rpm','.appimage','.apk','.zip','.7z','.rar','.tar','.gz','.xz','.iso','.vsix']);if(isProgram&&!programExts.has(ext))return res.status(400).json({error:'صيغة البرنامج غير مدعومة. استخدم ملف تثبيت أو أرشيفاً مثل EXE أو MSI أو DMG أو ZIP أو APK.'});const limit=isVideo?LIBRARY_VIDEO_LIMIT:(isProgram?500*1024*1024:LIBRARY_FILE_LIMIT);
+  const isProgram=kind==='برنامج قابل للتنزيل';if(isProgram&&req.session.user.role!=='admin')return res.status(403).json({error:'رفع البرامج القابلة للتنزيل متاح للمدير فقط.'});const programExts=new Set(['.exe','.msi','.msix','.appx','.dmg','.pkg','.deb','.rpm','.appimage','.apk','.zip','.7z','.rar','.tar','.gz','.xz','.iso','.vsix']);if(isProgram&&!programExts.has(ext))return res.status(400).json({error:'صيغة البرنامج غير مدعومة. استخدم ملف تثبيت أو أرشيفاً مثل EXE أو MSI أو DMG أو ZIP أو APK.'});const limit=isVideo?LIBRARY_VIDEO_LIMIT:(isProgram?100*1024*1024:LIBRARY_FILE_LIMIT);
   const declared=Number(req.headers['content-length']||0);
-  if(declared>limit)return res.status(413).json({error:`الحد الأقصى ${isVideo?100:(isProgram?500:50)} ميجابايت.`});
+  if(declared>limit)return res.status(413).json({error:`الحد الأقصى ${isVideo?100:(isProgram?100:50)} ميجابايت.`});
   const stored=`${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`;
   tempFile=path.join(uploadDir,`${stored}.uploading`);
   let received=0;
   await new Promise((resolve,reject)=>{
    const output=fs.createWriteStream(tempFile,{flags:'wx'});let settled=false;
    const fail=err=>{if(settled)return;settled=true;output.destroy();req.resume();reject(err)};
-   req.on('data',chunk=>{if(settled)return;received+=chunk.length;if(received>limit){const err=new Error(`الحد الأقصى ${isVideo?100:(isProgram?500:50)} ميجابايت.`);err.status=413;return fail(err)}if(!output.write(chunk))req.pause()});
+   req.on('data',chunk=>{if(settled)return;received+=chunk.length;if(received>limit){const err=new Error(`الحد الأقصى ${isVideo?100:(isProgram?100:50)} ميجابايت.`);err.status=413;return fail(err)}if(!output.write(chunk))req.pause()});
    output.on('drain',()=>req.resume());
    req.on('end',()=>{if(!settled)output.end()});
    req.on('aborted',()=>fail(new Error('انقطع الاتصال قبل اكتمال رفع الملف.')));

@@ -2537,8 +2537,8 @@ function platformAuthorize() {
 // Create a Drive resumable-upload session under the bridge owner's Drive permissions.
 function platformCreateUploadSession_(p, folder) {
   var name=String(p.name||'file').replace(/[\\/:*?"<>|]/g,'_').slice(0,180);
-  var allowed=/\.(doc|docx|xls|xlsx|ppt|pptx|pdf|txt|png|jpe?g|gif|webp|zip|mp4|webm|mov|m4v)$/i;
-  if(!allowed.test(name))throw new Error('صيغة الملف غير مدعومة.');
+  var allowed=/\.(doc|docx|xls|xlsx|ppt|pptx|pdf|txt|md|csv|rtf|png|jpe?g|gif|webp|bmp|zip|7z|rar|tar|gz|tgz|xz|bz2|msi|exe|msix|appx|dmg|pkg|deb|rpm|appimage|apk|jar|vsix|iso)$/i;
+  if(!allowed.test(name))throw new Error('نوع الملف غير مدعوم.');
   var size=Number(p.size);if(!isFinite(size)||size<=0||size>104857600)throw new Error('الحد الأقصى لحجم الملف 100 ميجابايت.');
   var mime=String(p.mime||'application/octet-stream');if(mime.length>150)mime='application/octet-stream';
   var metadata={name:Date.now()+'_'+name,mimeType:mime,parents:[folder.getId()]};

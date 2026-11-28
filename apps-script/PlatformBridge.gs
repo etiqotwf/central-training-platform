@@ -137,13 +137,13 @@ function platformCreateUploadSession_(p, folder) {
     .slice(0, 180);
 
   const size = Number(p.size);
-  const maxBytes = 100 * 1024 * 1024; // الحد الأعلى المتوافق مع مسار مكتبة الفيديو في Render
+  const maxBytes = 100 * 1024 * 1024; // حد موحد مع مسار رفع المكتبة في Render
 
   if (!name || !Number.isSafeInteger(size) || size <= 0 || size > maxBytes) {
     throw new Error('حجم الملف غير صالح. الحد الأقصى 100 ميجابايت.');
   }
 
-  const allowed = /\.(docx?|xlsx?|pptx?|pdf|txt|png|jpe?g|gif|webp|zip|7z|rar|tar|gz|tgz|xz|msi|exe|msix|appx|dmg|pkg|deb|rpm|appimage|apk|jar)$/i;
+  const allowed = /\.(docx?|xlsx?|pptx?|pdf|txt|md|csv|rtf|png|jpe?g|gif|webp|bmp|zip|7z|rar|tar|gz|tgz|xz|bz2|msi|exe|msix|appx|dmg|pkg|deb|rpm|appimage|apk|jar|vsix|iso)$/i;
   if (!allowed.test(name)) {
     throw new Error('نوع الملف غير مدعوم.');
   }

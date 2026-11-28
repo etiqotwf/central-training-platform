@@ -1,8 +1,8 @@
 {
-  "name": "british-institute-tanta",
+  "name": "central-training-platform",
   "version": "1.0.0",
   "private": true,
-  "description": "Local training management platform starter for Central Training Administration",
+  "description": "Central Training Platform",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
