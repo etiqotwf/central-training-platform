@@ -482,7 +482,7 @@ async function openTraineePerformanceReport(id,courseId=null){
   </section>`).join('');
   const testDetails=tests.filter(x=>x.questions.length).map(x=>`<section class="panel"><h4>${esc(x.title)} — ${esc(x.course_title)} — المحاولة #${x.attempt_id}</h4>${x.questions.map((q,i)=>`<p><strong>س${i+1}:</strong> ${esc(q.question)}<br>إجابة المتدرب: ${esc(q.answer_text||'لم تتم الإجابة')} · الصحيحة: ${esc(q.correct_text||'—')} · ${q.correct?'صحيح':'غير صحيح'}</p>`).join('')}</section>`).join('');
   body.innerHTML=`<div id="traineeReportPrint">
-   <header class="trainee-report-header"><h1>British Institute Tanta</h1><h2>تقرير أداء المتدرب</h2><p><strong>${esc(t.name)}</strong> · ${esc(t.phone||'—')} · ${esc(t.email||'—')} · ${esc(t.department||'—')}</p><p>تاريخ إنشاء التقرير: ${dt(data.generated_at)}</p></header>
+   <header class="trainee-report-header"><h1>منصة الإدارة المركزية للتدريب</h1><h2>تقرير أداء المتدرب</h2><p><strong>${esc(t.name)}</strong> · ${esc(t.phone||'—')} · ${esc(t.email||'—')} · ${esc(t.department||'—')}</p><p>تاريخ إنشاء التقرير: ${dt(data.generated_at)}</p></header>
    <h3>ملخص الأداء حسب الدورة</h3>${courses||'<p>لا توجد دورات مسجل بها المتدرب.</p>'}
    <h3>المهام والواجبات والتسليمات</h3>${table(['الدورة','النوع','النشاط','تاريخ التسليم','الدرجة','ملاحظات المدرب','الإجابة / الملف'],workRows)}
    <h3>الاختبارات والمحاولات</h3>${table(['الدورة','الاختبار','المحاولة','البدء','التسليم','الدرجة','الحالة','النتيجة'],testRows)}${testDetails?`<h4>تفاصيل إجابات الاختبارات</h4>${testDetails}`:''}
